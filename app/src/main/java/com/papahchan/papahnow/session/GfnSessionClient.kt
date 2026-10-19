@@ -81,7 +81,7 @@ class GfnSessionClient(
         private const val AUTH_SCHEME = "GFNJWT"
 
         // Values captured from GFN client traffic.
-        private const val CLIENT_ID = "ec73e384-03af-4b58-b131-cfb0495903ab"
+        private const val CLIENT_ID = "ec7e384d-03af-4b58-b131-cfb0495903ab"
         private const val CLIENT_STREAMER = "WEBRTC"
         // Client version reported in the body and the nv-client-version header. Community
         // clients use the "GFN-PC/30.0" identity accepted by Cloudmatch.
