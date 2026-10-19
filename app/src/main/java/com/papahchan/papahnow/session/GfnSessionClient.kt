@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -82,7 +83,9 @@ class GfnSessionClient(
         // Values captured from GFN client traffic.
         private const val CLIENT_ID = "ec73e384-03af-4b58-b131-cfb0495903ab"
         private const val CLIENT_STREAMER = "WEBRTC"
-        private const val CLIENT_VERSION = "6.39.39022815" // GFN Android APK version, see docs/AUTH_FLOW.md
+        // Client version reported in the body and the nv-client-version header. Community
+        // clients use the "GFN-PC/30.0" identity accepted by Cloudmatch.
+        private const val CLIENT_VERSION = "30.0"
         private const val CLIENT_PLATFORM_NAME = "android"
         private const val CLIENT_IDENTIFICATION = "GFN-PC"
 
@@ -122,11 +125,11 @@ class GfnSessionClient(
             .addHeader("nv-device-type", DEVICE_TYPE)
 
     /**
-     * GFN expects the JS-style timezone offset in minutes (UTC - local), e.g. -420 for
-     * UTC+7. Computed per request so timezone changes are picked up.
+     * GFN expects the timezone offset in milliseconds (positive east of UTC), e.g.
+     * +25200000 for UTC+7. Computed per request so timezone changes are picked up.
      */
-    private fun currentTimezoneOffsetMinutes(): Int =
-        -(TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000)
+    private fun currentTimezoneOffsetMs(): Int =
+        TimeZone.getDefault().getOffset(System.currentTimeMillis())
 
     /**
      * Requests a game streaming session from Cloudmatch API.
@@ -136,7 +139,7 @@ class GfnSessionClient(
      */
     suspend fun createStreamingSession(
         authToken: String,
-        appId: Int = 0, // 0 for default / initial session test
+        appId: Int = 107879576, // NTE, from browser capture
         width: Int = 1280,
         height: Int = 720,
         fps: Int = 60
@@ -144,28 +147,75 @@ class GfnSessionClient(
         val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
         // Query params required by the session endpoint, per browser capture.
         val endpoint = "$baseEndpoint?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
+        val subSessionId = UUID.randomUUID().toString()
         val payload = buildJsonObject {
             put("sessionRequestData", buildJsonObject {
                 put("appId", appId)
+                put("internalTitle", JsonNull)
                 put("audioMode", 2)
                 put("remoteControllersBitmap", 0)
                 put("sdrHdrMode", 0)
+                put("networkTestSessionId", JsonNull)
+                put("availableSupportedControllers", buildJsonArray { })
+                put("parentSessionId", JsonNull)
+                put("clientVersion", CLIENT_VERSION)
+                put("deviceHashId", deviceHashId)
                 put("clientPlatformName", CLIENT_PLATFORM_NAME)
                 put("clientIdentification", CLIENT_IDENTIFICATION)
-                put("deviceHashId", deviceHashId)
-                put("clientVersion", CLIENT_VERSION)
-                put("clientTimezoneOffset", currentTimezoneOffsetMinutes())
+                put("streamerVersion", 1)
+                put("clientTimezoneOffset", currentTimezoneOffsetMs())
+                put("surroundAudioInfo", 0)
+                put("clientDisplayHdrCapabilities", JsonNull)
+                put("accountLinked", false)
+                put("partnerCustomData", "")
+                put("enablePersistingInGameSettings", false)
+                put("secureRTSPSupported", false)
                 put("metaData", buildJsonArray {
+                    add(buildJsonObject {
+                        put("key", "SubSessionId")
+                        put("value", subSessionId)
+                    })
                     add(buildJsonObject {
                         put("key", "wssignaling")
                         put("value", "1")
                     })
+                    add(buildJsonObject {
+                        put("key", "GSStreamerType")
+                        put("value", "WebRTC")
+                    })
+                    add(buildJsonObject {
+                        put("key", "networkType")
+                        put("value", "Unknown")
+                    })
+                    add(buildJsonObject {
+                        put("key", "ClientImeSupport")
+                        put("value", "0")
+                    })
+                    add(buildJsonObject {
+                        put("key", "clientPhysicalResolution")
+                        put("value", buildJsonObject {
+                            put("horizontalPixels", width)
+                            put("verticalPixels", height)
+                        }.toString())
+                    })
+                    add(buildJsonObject {
+                        put("key", "isAppLaunchEnabled")
+                        put("value", "True")
+                    })
+                    add(buildJsonObject {
+                        put("key", "surroundAudioInfo")
+                        put("value", "2")
+                    })
                 })
                 put("clientRequestMonitorSettings", buildJsonArray {
                     add(buildJsonObject {
-                        put("width", width)
-                        put("height", height)
-                        put("fps", fps)
+                        put("monitorId", 0)
+                        put("positionX", 0)
+                        put("positionY", 0)
+                        put("widthInPixels", width)
+                        put("heightInPixels", height)
+                        put("dpi", 0)
+                        put("framesPerSecond", fps)
                         put("sdrHdrMode", 0)
                     })
                 })
