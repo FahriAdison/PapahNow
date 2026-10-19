@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PapahNow" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/neon_noir_base</item>
+        <item name="android:statusBarColor">@color/neon_noir_base</item>
+        <item name="android:navigationBarColor">@color/neon_noir_base</item>
+    </style>
+</resources>

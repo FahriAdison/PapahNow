@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+
+# Keystores (never commit signing keys)
+*.keystore
+*.jks
+
+# OS
+.DS_Store
+Thumbs.db
