@@ -50,8 +50,8 @@ data class SignalingServerInfo(
 )
 
 class GfnSessionClient(
-    // Regional Cloudmatch host closest to Indonesia (Mumbai / BOM), see
-    // docs/STREAMING_PROTOCOL.md section 4.4. Pass a different host to override.
+    // Asia-Pacific regional Cloudmatch host, per browser capture. Pass a different
+    // host to override.
     private val cloudmatchUrl: String = DEFAULT_CLOUDMATCH_URL,
     // Device id sent to Cloudmatch. Must stay equal to the `device_id` used by the OAuth
     // flow (GfnAuthManager). Default mirrors the official APK config, see docs/AUTH_FLOW.md.
@@ -64,9 +64,13 @@ class GfnSessionClient(
         private const val TAG = "GfnSessionClient"
         private const val SIGNALING_USAGE_TYPE = 14
 
-        // Regional host for Indonesia (np-bom-01 = Mumbai). Use
+        // Asia-Pacific regional host (ap-india), from browser capture. Use
         // "https://prod.cloudmatchbeta.nvidiagrid.net" for global routing.
-        private const val DEFAULT_CLOUDMATCH_URL = "https://np-bom-01.cloudmatchbeta.nvidiagrid.net"
+        private const val DEFAULT_CLOUDMATCH_URL = "https://ap-india.cloudmatchbeta.nvidiagrid.net"
+
+        // Query parameters required by the session request endpoint.
+        private const val KEYBOARD_LAYOUT = "en_US"
+        private const val LANGUAGE_CODE = "en_US"
 
         // Client identity — single source of truth for every Cloudmatch request
         // (create session + polling).
@@ -137,7 +141,9 @@ class GfnSessionClient(
         height: Int = 720,
         fps: Int = 60
     ): Result<SignalingServerInfo> = withContext(Dispatchers.IO) {
-        val endpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
+        val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
+        // Query params required by the session endpoint, per browser capture.
+        val endpoint = "$baseEndpoint?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
         val payload = buildJsonObject {
             put("sessionRequestData", buildJsonObject {
                 put("appId", appId)
@@ -195,8 +201,8 @@ class GfnSessionClient(
                 retries++
                 Log.i(TAG, "Polling session status (${session.sessionId}), state=${session.state}, attempt $retries...")
 
-                // Polling uses the exact same identity headers as create-session.
-                val pollReq = cloudmatchRequest("$endpoint/${session.sessionId}", authToken)
+                // Polling uses the same identity headers; path without query params.
+                val pollReq = cloudmatchRequest("$baseEndpoint/${session.sessionId}", authToken)
                     .get()
                     .build()
 
