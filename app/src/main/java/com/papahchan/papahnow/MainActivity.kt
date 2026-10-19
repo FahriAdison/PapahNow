@@ -185,9 +185,11 @@ class MainActivity : ComponentActivity() {
         statusDetail = "Exchanging auth code for token..."
         val result = authManager.exchangeAuthorizationCode(code)
         result.onSuccess { tokens ->
-            authTokenInput = tokens.accessToken
+            // GFNJWT session API expects the GFN client token, not the OAuth access token.
+            val sessionToken = tokens.clientToken ?: tokens.accessToken
+            authTokenInput = sessionToken
             statusDetail = "Token obtained! Creating session..."
-            createSessionAndConnect(tokens.accessToken)
+            createSessionAndConnect(sessionToken)
         }.onFailure { ex ->
             Log.e(TAG, "Token exchange failed", ex)
             errorMessage = "Token exchange failed: ${ex.localizedMessage}"
@@ -195,12 +197,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun createSessionAndConnect(accessToken: String) {
+    private fun createSessionAndConnect(authToken: String) {
         connectionState = ConnectionState.CREATING_SESSION
         statusDetail = "Requesting session from cloudmatch..."
 
         CoroutineScope(Dispatchers.Main).launch {
-            val result = sessionClient.createStreamingSession(accessToken)
+            val result = sessionClient.createStreamingSession(authToken)
             result.onSuccess { serverInfo ->
                 statusDetail = "Session created (${serverInfo.sessionId}). Connecting signaling..."
                 connectSignaling(serverInfo)
