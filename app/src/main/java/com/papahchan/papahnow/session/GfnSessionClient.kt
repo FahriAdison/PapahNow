@@ -15,6 +15,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.TimeZone
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 @Serializable
@@ -53,7 +55,10 @@ class GfnSessionClient(
     private val cloudmatchUrl: String = DEFAULT_CLOUDMATCH_URL,
     // Device id sent to Cloudmatch. Must stay equal to the `device_id` used by the OAuth
     // flow (GfnAuthManager). Default mirrors the official APK config, see docs/AUTH_FLOW.md.
-    private val deviceId: String = DEFAULT_DEVICE_ID
+    private val deviceId: String = DEFAULT_DEVICE_ID,
+    // UUID identifying this device in session requests. Override with a value persisted
+    // per install to keep it stable across app restarts.
+    private val deviceHashId: String = UUID.randomUUID().toString()
 ) {
     companion object {
         private const val TAG = "GfnSessionClient"
@@ -113,6 +118,13 @@ class GfnSessionClient(
             .addHeader("nv-device-type", DEVICE_TYPE)
 
     /**
+     * GFN expects the JS-style timezone offset in minutes (UTC - local), e.g. -420 for
+     * UTC+7. Computed per request so timezone changes are picked up.
+     */
+    private fun currentTimezoneOffsetMinutes(): Int =
+        -(TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000)
+
+    /**
      * Requests a game streaming session from Cloudmatch API.
      *
      * @param authToken GFN JWT sent as `Authorization: GFNJWT <token>` (client token, not
@@ -127,30 +139,35 @@ class GfnSessionClient(
     ): Result<SignalingServerInfo> = withContext(Dispatchers.IO) {
         val endpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
         val payload = buildJsonObject {
-            put("appId", appId)
-            put("audioMode", 2)
-            put("remoteControllersBitmap", 0)
-            put("sdrHdrMode", 0)
-            put("clientPlatformName", CLIENT_PLATFORM_NAME)
-            put("clientIdentification", CLIENT_IDENTIFICATION)
-            put("metaData", buildJsonArray {
-                add(buildJsonObject {
-                    put("key", "wssignaling")
-                    put("value", "1")
+            put("sessionRequestData", buildJsonObject {
+                put("appId", appId)
+                put("audioMode", 2)
+                put("remoteControllersBitmap", 0)
+                put("sdrHdrMode", 0)
+                put("clientPlatformName", CLIENT_PLATFORM_NAME)
+                put("clientIdentification", CLIENT_IDENTIFICATION)
+                put("deviceHashId", deviceHashId)
+                put("clientVersion", CLIENT_VERSION)
+                put("clientTimezoneOffset", currentTimezoneOffsetMinutes())
+                put("metaData", buildJsonArray {
+                    add(buildJsonObject {
+                        put("key", "wssignaling")
+                        put("value", "1")
+                    })
                 })
-            })
-            put("clientRequestMonitorSettings", buildJsonArray {
-                add(buildJsonObject {
-                    put("width", width)
-                    put("height", height)
-                    put("fps", fps)
-                    put("sdrHdrMode", 0)
+                put("clientRequestMonitorSettings", buildJsonArray {
+                    add(buildJsonObject {
+                        put("width", width)
+                        put("height", height)
+                        put("fps", fps)
+                        put("sdrHdrMode", 0)
+                    })
                 })
+                put("appLaunchMode", 1)
+                put("sdkVersion", "1.0")
+                put("enhancedStreamMode", 1)
+                put("useOps", true)
             })
-            put("appLaunchMode", 1)
-            put("sdkVersion", "1.0")
-            put("enhancedStreamMode", 1)
-            put("useOps", true)
         }.toString()
 
         Log.i(TAG, "Requesting session from $endpoint...")
