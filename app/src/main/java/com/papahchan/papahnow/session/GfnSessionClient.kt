@@ -86,14 +86,15 @@ class GfnSessionClient(
         // Client version reported in the body and the nv-client-version header. Community
         // clients use the "GFN-PC/30.0" identity accepted by Cloudmatch.
         private const val CLIENT_VERSION = "30.0"
-        private const val CLIENT_PLATFORM_NAME = "android"
+        private const val CLIENT_PLATFORM_NAME = "windows"
         private const val CLIENT_IDENTIFICATION = "GFN-PC"
 
-        // Android-native identity (must be identical on POST and GET).
-        private const val CLIENT_TYPE = "mobile"   // nv-client-type
+        // Web/PC identity, consistent with the WEBRTC streamer path and the GFN-PC
+        // capture. Must be identical on POST and GET.
+        private const val CLIENT_TYPE = "NATIVE"   // nv-client-type
         private const val BROWSER_TYPE = "Chrome"  // nv-browser-type
-        private const val DEVICE_OS = "Android"    // nv-device-os
-        private const val DEVICE_TYPE = "PHONE"    // nv-device-type
+        private const val DEVICE_OS = "WINDOWS"    // nv-device-os
+        private const val DEVICE_TYPE = "DESKTOP"  // nv-device-type
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -123,6 +124,15 @@ class GfnSessionClient(
             .addHeader("nv-browser-type", BROWSER_TYPE)
             .addHeader("nv-device-os", DEVICE_OS)
             .addHeader("nv-device-type", DEVICE_TYPE)
+
+    /** Censors the GFN JWT when logging headers: scheme + short prefix + length only. */
+    private fun maskAuthorization(value: String): String {
+        val spaceIndex = value.indexOf(' ')
+        if (spaceIndex < 0) return "<censored>"
+        val scheme = value.substring(0, spaceIndex)
+        val token = value.substring(spaceIndex + 1)
+        return "$scheme ${token.take(8)}...<censored, ${token.length} chars>"
+    }
 
     /**
      * GFN expects the timezone offset in milliseconds (positive east of UTC), e.g.
@@ -223,6 +233,17 @@ class GfnSessionClient(
                 put("sdkVersion", "1.0")
                 put("enhancedStreamMode", 1)
                 put("useOps", true)
+                put("requestedStreamingFeatures", buildJsonObject {
+                    put("reflex", false)
+                    put("bitDepth", 0)
+                    put("cloudGsync", false)
+                    put("enabledL4S", false)
+                    put("profile", 0)
+                    put("fallbackToLogicalResolution", false)
+                    put("chromaFormat", 0)
+                    put("prefilterMode", 0)
+                    put("hudStreamingMode", 0)
+                })
             })
         }.toString()
 
@@ -231,6 +252,14 @@ class GfnSessionClient(
         val request = cloudmatchRequest(endpoint, authToken)
             .post(requestBody)
             .build()
+
+        // Full request dump for diffing against browser captures. The JWT is censored.
+        Log.d(TAG, "POST $endpoint")
+        request.headers.forEach { (name, value) ->
+            val logged = if (name.equals("Authorization", ignoreCase = true)) maskAuthorization(value) else value
+            Log.d(TAG, "  $name: $logged")
+        }
+        Log.d(TAG, "Request body: $payload")
 
         try {
             var response = httpClient.newCall(request).execute()
