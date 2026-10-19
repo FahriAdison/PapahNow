@@ -48,11 +48,25 @@ data class SignalingServerInfo(
 )
 
 class GfnSessionClient(
-    private val cloudmatchUrl: String = "https://prod.cloudmatchbeta.nvidiagrid.net"
+    private val cloudmatchUrl: String = "https://prod.cloudmatchbeta.nvidiagrid.net",
+    // Device id sent to Cloudmatch. Must stay equal to the `device_id` used by the OAuth
+    // flow (GfnAuthManager). Default mirrors the official APK config, see docs/AUTH_FLOW.md.
+    private val deviceId: String = DEFAULT_DEVICE_ID
 ) {
     companion object {
         private const val TAG = "GfnSessionClient"
         private const val SIGNALING_USAGE_TYPE = 14
+
+        // Client identity — single source of truth for every Cloudmatch request
+        // (create session + polling). This client mimics the GFN web client path,
+        // see docs/STREAMING_PROTOCOL.md section 4.
+        const val DEFAULT_DEVICE_ID = "gfnclient"
+        private const val CLIENT_PLATFORM_NAME = "android"
+        private const val CLIENT_IDENTIFICATION = "GFN-PC"
+        // HTTP identity headers (must be identical on POST and GET).
+        private const val CLIENT_TYPE = "mobile"   // nv-client-type
+        private const val BROWSER_TYPE = "Chrome"  // nv-browser-type
+        private const val DEVICE_OS = "Android"    // nv-device-os
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -64,6 +78,20 @@ class GfnSessionClient(
         ignoreUnknownKeys = true
         isLenient = true
     }
+
+    /**
+     * Builds every Cloudmatch request with the same client identity headers.
+     * Always go through this helper so create-session and polling never diverge.
+     */
+    private fun cloudmatchRequest(url: String, accessToken: String): Request.Builder =
+        Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer $accessToken")
+            .addHeader("Content-Type", "application/json")
+            .addHeader("x-device-id", deviceId)
+            .addHeader("nv-client-type", CLIENT_TYPE)
+            .addHeader("nv-browser-type", BROWSER_TYPE)
+            .addHeader("nv-device-os", DEVICE_OS)
 
     /**
      * Requests a game streaming session from Cloudmatch API.
@@ -81,8 +109,8 @@ class GfnSessionClient(
             put("audioMode", 2)
             put("remoteControllersBitmap", 0)
             put("sdrHdrMode", 0)
-            put("clientPlatformName", "android")
-            put("clientIdentification", "GFN-PC")
+            put("clientPlatformName", CLIENT_PLATFORM_NAME)
+            put("clientIdentification", CLIENT_IDENTIFICATION)
             put("metaData", buildJsonArray {
                 add(buildJsonObject {
                     put("key", "wssignaling")
@@ -105,15 +133,8 @@ class GfnSessionClient(
 
         Log.i(TAG, "Requesting session from $endpoint...")
         val requestBody = payload.toRequestBody("application/json".toMediaType())
-        val request = Request.Builder()
-            .url(endpoint)
+        val request = cloudmatchRequest(endpoint, accessToken)
             .post(requestBody)
-            .addHeader("Authorization", "Bearer $accessToken")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("x-device-id", "gfnclient")
-            .addHeader("nv-client-type", "mobile")
-            .addHeader("nv-browser-type", "Chrome")
-            .addHeader("nv-device-os", "Android")
             .build()
 
         try {
@@ -135,12 +156,9 @@ class GfnSessionClient(
                 retries++
                 Log.i(TAG, "Polling session status (${session.sessionId}), state=${session.state}, attempt $retries...")
 
-                val pollReq = Request.Builder()
-                    .url("$endpoint/${session.sessionId}")
+                // Polling uses the exact same identity headers as create-session.
+                val pollReq = cloudmatchRequest("$endpoint/${session.sessionId}", accessToken)
                     .get()
-                    .addHeader("Authorization", "Bearer $accessToken")
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("x-device-id", "gfnclient")
                     .build()
 
                 response = httpClient.newCall(pollReq).execute()
