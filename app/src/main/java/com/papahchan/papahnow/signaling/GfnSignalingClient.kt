@@ -158,7 +158,7 @@ class GfnSignalingClient(
         )
         val payloadString = jsonConfig.encodeToString(payload)
         val wrapper = ClientPeerMessageWrapper(
-            peer_msg = PeerMessagePayload(
+            peerMsg = PeerMessagePayload(
                 from = clientId,
                 to = targetPeerId,
                 msg = payloadString
@@ -179,7 +179,7 @@ class GfnSignalingClient(
         )
         val payloadString = jsonConfig.encodeToString(payload)
         val wrapper = ClientPeerMessageWrapper(
-            peer_msg = PeerMessagePayload(
+            peerMsg = PeerMessagePayload(
                 from = clientId,
                 to = targetPeerId,
                 msg = payloadString
