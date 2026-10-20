@@ -291,7 +291,9 @@ class GfnSessionClient(
                     put("sdrHdrMode", 0)
                 })
             })
-            put("appLaunchMode", 1)
+            // NanaPlay default GAMEPAD_FRIENDLY (GfnAppLaunchMode): the host
+            // provisions its virtual input devices from this value.
+            put("appLaunchMode", 2)
             put("sdkVersion", "1.0")
             put("enhancedStreamMode", 1)
             put("useOps", true)
