@@ -74,24 +74,26 @@ class GfnSessionClient(
         // GFN expects its own JWT scheme for the Authorization header, not Bearer.
         private const val AUTH_SCHEME = "GFNJWT"
 
-        // Body identity, captured from GFN client traffic. clientVersion stays "30.0"
-        // (Cloudmatch client identity); the web page version goes in nv-client-version.
+        // Body identity, matching the proven NanaPlay client. clientVersion stays "30.0"
+        // (Cloudmatch client identity); the Android app version goes in nv-client-version.
         private const val CLIENT_ID = "ec7e38d4-03af-4b58-b131-cfb0495903ab"
-        private const val CLIENT_STREAMER = "WEBRTC"
+        private const val CLIENT_STREAMER = "NVIDIA-CLASSIC"
         private const val CLIENT_VERSION = "30.0"
-        private const val CLIENT_PLATFORM_NAME = "linux"
+        private const val CLIENT_PLATFORM_NAME = "android"
         private const val CLIENT_IDENTIFICATION = "GFN-PC"
 
-        // Firefox web identity from play.geforcenow.com, header-only. Must be identical
+        // NanaPlay client identity (proven working), header-only. Must be identical
         // on POST and GET.
-        private const val CLIENT_TYPE = "BROWSER"           // nv-client-type
-        private const val NV_CLIENT_VERSION = "2.0.89.154"  // nv-client-version
-        private const val BROWSER_TYPE = "FIREFOX"          // nv-browser-type
-        private const val DEVICE_OS = "LINUX"               // nv-device-os
-        private const val DEVICE_TYPE = "DESKTOP"           // nv-device-type
+        private const val CLIENT_TYPE = "NATIVE"            // nv-client-type
+        private const val NV_CLIENT_VERSION = "2.0.80.173"  // nv-client-version
+        private const val BROWSER_TYPE = "CHROME"           // nv-browser-type
+        private const val DEVICE_OS = "ANDROID"             // nv-device-os
+        private const val DEVICE_TYPE = "PHONE"             // nv-device-type
         private const val DEVICE_MAKE = "UNKNOWN"           // nv-device-make
         private const val DEVICE_MODEL = "UNKNOWN"          // nv-device-model
-        private const val ORIGIN = "https://play.geforcenow.com" // Origin
+        private const val USER_AGENT = "GFN-PC/22.0 (Android 14) PGC/3.8 (6.36.38319306) okhttp/4.12.0"
+        private const val ORIGIN = "https://play.geforcenow.com"   // Origin
+        private const val REFERER = "https://play.geforcenow.com/" // Referer
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -112,7 +114,9 @@ class GfnSessionClient(
         Request.Builder()
             .url(url)
             .addHeader("Authorization", "$AUTH_SCHEME $authToken")
+            .addHeader("User-Agent", USER_AGENT)
             .addHeader("Origin", ORIGIN)
+            .addHeader("Referer", REFERER)
             .addHeader("Content-Type", "application/json")
             .addHeader("x-device-id", deviceHashId)
             .addHeader("nv-client-id", CLIENT_ID)
@@ -176,7 +180,8 @@ class GfnSessionClient(
                 put("clientTimezoneOffset", currentTimezoneOffsetMs())
                 put("surroundAudioInfo", 0)
                 put("clientDisplayHdrCapabilities", JsonNull)
-                put("accountLinked", false)
+                put("accountLinked", true)
+                put("userAge", 26)
                 put("partnerCustomData", "")
                 put("enablePersistingInGameSettings", false)
                 put("secureRTSPSupported", false)
