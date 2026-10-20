@@ -282,6 +282,10 @@ class GfnSessionClient(
                     put("key", "surroundAudioInfo")
                     put("value", "2")
                 })
+                add(buildJsonObject {
+                    put("key", "NanaPlayStreamSettingsSignature")
+                    put("value", nanaPlayStreamSettingsSignature(width, height, fps))
+                })
             })
             // Parity with NanaPlay monitorSettings() (GfnApi.kt): every monitor
             // entry carries displayData + hdr10PlusGamingData (explicit JsonNull
@@ -334,6 +338,31 @@ class GfnSessionClient(
         logSessionRequestData(data)
         return data
     }
+
+    /**
+     * Parity for NanaPlay's OPENNOW_STREAM_SETTINGS_METADATA_KEY
+     * ("NanaPlayStreamSettingsSignature") written by GfnApi.kt
+     * webRtcSessionMetadata() during createSession. Reproduces
+     * streamSettingsSessionSignature() (NanaPlay Models.kt:617-633) for our
+     * fixed profile: resolution/fps come from the request args; the rest are
+     * NanaPlay StreamSettings defaults (Models.kt StreamSettings + withCodecColorCompatibility):
+     * maxBitrateMbps=75, codec=H264, colorQuality=TenBit420 (SDR, no 444), and
+     * the defaults hdr=0, l4s=0, gsync=0, keyboardLayout="en-US", gameLanguage="en_US".
+     */
+    private fun nanaPlayStreamSettingsSignature(width: Int, height: Int, fps: Int): String =
+        listOf(
+            "opennow-android-stream-v1",
+            "res=${width}x$height",
+            "fps=$fps",
+            "bitrate=75",
+            "codec=H264",
+            "color=TenBit420",
+            "hdr=0",
+            "l4s=0",
+            "gsync=0",
+            "keyboard=en-US",
+            "language=en_US"
+        ).joinToString(";")
 
     /** Verifies the shared builder really populated every field CloudMatch reads. */
     private fun logSessionRequestData(data: JsonObject) {
