@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -36,7 +37,9 @@ data class SessionData(
 @Serializable
 data class ConnectionInfoItem(
     @SerialName("usage") val usage: Int, // 14 = WebSocket Signaling, 2/17 = Media
-    @SerialName("ip") val ip: String,
+    // Non-signaling entries can carry a null ip (classic routing), so decode must not
+    // fail here; the signaling lookup validates it instead.
+    @SerialName("ip") val ip: String? = null,
     @SerialName("port") val port: Int,
     @SerialName("appLevelProtocol") val appLevelProtocol: Int = 5, // 5 = WSS
     @SerialName("resourcePath") val resourcePath: String? = null
@@ -298,18 +301,29 @@ class GfnSessionClient(
                 }
             }
 
+            // Raw connectionInfo (including fields we don't model) so classic-routing
+            // responses can be inspected directly in Logcat.
+            val rawConnectionInfo = runCatching {
+                json.parseToJsonElement(body).jsonObject["session"]?.jsonObject?.get("connectionInfo")
+            }.getOrNull()
+            Log.i(TAG, "Raw connectionInfo: $rawConnectionInfo")
+
             val connectionList = session.connectionInfo
                 ?: return@withContext Result.failure(Exception("Session created but no connectionInfo received. State: ${session.state}"))
+
+            Log.i(TAG, "connectionInfo: $connectionList")
 
             val signalingInfo = connectionList.find { it.usage == SIGNALING_USAGE_TYPE }
                 ?: return@withContext Result.failure(Exception("No signaling server (usage=$SIGNALING_USAGE_TYPE) found in connectionInfo: $connectionList"))
 
+            val host = signalingInfo.ip
+                ?: return@withContext Result.failure(Exception("Signaling server (usage=$SIGNALING_USAGE_TYPE) has no ip: $signalingInfo"))
             val secure = signalingInfo.appLevelProtocol == 5 // 5 = wss
-            Log.i(TAG, "Signaling server found: host=${signalingInfo.ip}, port=${signalingInfo.port}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
+            Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
 
             Result.success(
                 SignalingServerInfo(
-                    host = signalingInfo.ip,
+                    host = host,
                     port = signalingInfo.port,
                     secure = secure,
                     resourcePath = signalingInfo.resourcePath,
