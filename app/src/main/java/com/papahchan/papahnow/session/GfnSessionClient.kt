@@ -54,11 +54,9 @@ class GfnSessionClient(
     // Asia-Pacific regional Cloudmatch host, per browser capture. Pass a different
     // host to override.
     private val cloudmatchUrl: String = DEFAULT_CLOUDMATCH_URL,
-    // Device id sent to Cloudmatch. Must stay equal to the `device_id` used by the OAuth
-    // flow (GfnAuthManager). Default mirrors the official APK config, see docs/AUTH_FLOW.md.
-    private val deviceId: String = DEFAULT_DEVICE_ID,
-    // UUID identifying this device in session requests. Override with a value persisted
-    // per install to keep it stable across app restarts.
+    // UUID identifying this device. Sent both as the x-device-id header and as the
+    // deviceHashId body field, so the two can never diverge. Override with a value
+    // persisted per install to keep it stable across app restarts.
     private val deviceHashId: String = UUID.randomUUID().toString()
 ) {
     companion object {
@@ -73,28 +71,27 @@ class GfnSessionClient(
         private const val KEYBOARD_LAYOUT = "en_US"
         private const val LANGUAGE_CODE = "en_US"
 
-        // Client identity — single source of truth for every Cloudmatch request
-        // (create session + polling).
-        const val DEFAULT_DEVICE_ID = "gfnclient"
-
         // GFN expects its own JWT scheme for the Authorization header, not Bearer.
         private const val AUTH_SCHEME = "GFNJWT"
 
-        // Values captured from GFN client traffic.
+        // Body identity, captured from GFN client traffic. clientVersion stays "30.0"
+        // (Cloudmatch client identity); the web page version goes in nv-client-version.
         private const val CLIENT_ID = "ec7e38d4-03af-4b58-b131-cfb0495903ab"
         private const val CLIENT_STREAMER = "WEBRTC"
-        // Client version reported in the body and the nv-client-version header. Community
-        // clients use the "GFN-PC/30.0" identity accepted by Cloudmatch.
         private const val CLIENT_VERSION = "30.0"
-        private const val CLIENT_PLATFORM_NAME = "windows"
+        private const val CLIENT_PLATFORM_NAME = "linux"
         private const val CLIENT_IDENTIFICATION = "GFN-PC"
 
-        // Web/PC identity, consistent with the WEBRTC streamer path and the GFN-PC
-        // capture. Must be identical on POST and GET.
-        private const val CLIENT_TYPE = "NATIVE"   // nv-client-type
-        private const val BROWSER_TYPE = "Chrome"  // nv-browser-type
-        private const val DEVICE_OS = "WINDOWS"    // nv-device-os
-        private const val DEVICE_TYPE = "DESKTOP"  // nv-device-type
+        // Firefox web identity from play.geforcenow.com, header-only. Must be identical
+        // on POST and GET.
+        private const val CLIENT_TYPE = "BROWSER"           // nv-client-type
+        private const val NV_CLIENT_VERSION = "2.0.89.154"  // nv-client-version
+        private const val BROWSER_TYPE = "FIREFOX"          // nv-browser-type
+        private const val DEVICE_OS = "LINUX"               // nv-device-os
+        private const val DEVICE_TYPE = "DESKTOP"           // nv-device-type
+        private const val DEVICE_MAKE = "UNKNOWN"           // nv-device-make
+        private const val DEVICE_MODEL = "UNKNOWN"          // nv-device-model
+        private const val ORIGIN = "https://play.geforcenow.com" // Origin
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -115,15 +112,18 @@ class GfnSessionClient(
         Request.Builder()
             .url(url)
             .addHeader("Authorization", "$AUTH_SCHEME $authToken")
+            .addHeader("Origin", ORIGIN)
             .addHeader("Content-Type", "application/json")
-            .addHeader("x-device-id", deviceId)
+            .addHeader("x-device-id", deviceHashId)
             .addHeader("nv-client-id", CLIENT_ID)
             .addHeader("nv-client-streamer", CLIENT_STREAMER)
-            .addHeader("nv-client-version", CLIENT_VERSION)
+            .addHeader("nv-client-version", NV_CLIENT_VERSION)
             .addHeader("nv-client-type", CLIENT_TYPE)
             .addHeader("nv-browser-type", BROWSER_TYPE)
             .addHeader("nv-device-os", DEVICE_OS)
             .addHeader("nv-device-type", DEVICE_TYPE)
+            .addHeader("nv-device-make", DEVICE_MAKE)
+            .addHeader("nv-device-model", DEVICE_MODEL)
 
     /** Censors the GFN JWT when logging headers: scheme + short prefix + length only. */
     private fun maskAuthorization(value: String): String {
