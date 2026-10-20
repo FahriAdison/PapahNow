@@ -306,16 +306,29 @@ class GfnSessionClient(
             put("sdkVersion", "1.0")
             put("enhancedStreamMode", 1)
             put("useOps", true)
+            // Parity with NanaPlay requestedStreamingFeatures() (GfnApi.kt) for
+            // our SDR H264 720p60 profile: hdrEnabled=false -> trueHdr=false,
+            // bitDepth=0, chromaFormat=0, hdrColorSpace=0; reflex/cloudGsync/l4s
+            // off (NanaPlay defaults: enableCloudGsync=false, enableL4S=false,
+            // reflex needs fps>=120); hidDevices JsonNull exactly as they send.
             put("requestedStreamingFeatures", buildJsonObject {
                 put("reflex", false)
                 put("bitDepth", 0)
                 put("cloudGsync", false)
                 put("enabledL4S", false)
+                put("trueHdr", false)
+                put("mouseMovementFlags", 0)
+                put("supportedHidDevices", 0)
                 put("profile", 0)
                 put("fallbackToLogicalResolution", false)
+                put("hidDevices", JsonNull)
                 put("chromaFormat", 0)
                 put("prefilterMode", 0)
+                put("prefilterSharpness", 0)
+                put("prefilterNoiseReduction", 0)
                 put("hudStreamingMode", 0)
+                put("sdrColorSpace", 2)
+                put("hdrColorSpace", 0)
             })
         }
         logSessionRequestData(data)
