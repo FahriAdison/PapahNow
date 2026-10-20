@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.papahchan.papahnow.auth.GfnAuthManager
+import com.papahchan.papahnow.diagnostics.CrashDiagnostics
 import com.papahchan.papahnow.session.GfnSessionClient
 import com.papahchan.papahnow.session.SignalingServerInfo
 import com.papahchan.papahnow.signaling.GfnSignalingClient
@@ -82,6 +83,8 @@ class MainActivity : ComponentActivity() {
     private var connectionState by mutableStateOf(ConnectionState.DISCONNECTED)
     private var statusDetail by mutableStateOf("")
     private var errorMessage by mutableStateOf<String?>(null)
+    // Persisted crash record from the previous run; cleared from prefs once shown.
+    private var lastCrash by mutableStateOf<String?>(null)
     private var authTokenInput by mutableStateOf("")
     private var directSignalingUrlInput by mutableStateOf("")
     private var authCodeInput by mutableStateOf("")
@@ -89,6 +92,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Crash diagnostics FIRST: even this init code must be covered by the
+        // global handler before anything else can throw.
+        CrashDiagnostics.install(applicationContext)
+
+        // Read (and clear) what the previous run left behind, so a death without
+        // a catchable exception is still visible via the persisted stage record.
+        CrashDiagnostics.consumeStage()?.let { lastStage ->
+            statusDetail = "Last connect stage: $lastStage"
+        }
+        CrashDiagnostics.consumeCrash()?.let { lastCrash = it }
 
         // Initialize PeerConnection and StreamRenderer
         peerConnectionWrapper = GfnPeerConnection(this, peerConnectionListener)
@@ -134,6 +148,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startFullConnectionFlow() {
+        CrashDiagnostics.setStage("CONNECT_PRESSED")
         errorMessage = null
         statusDetail = "Starting connection..."
 
@@ -205,6 +220,7 @@ class MainActivity : ComponentActivity() {
         CoroutineScope(Dispatchers.Main).launch {
             val result = sessionClient.createStreamingSession(authToken)
             result.onSuccess { serverInfo ->
+                CrashDiagnostics.setStage("CREATE_OK sessionId=${serverInfo.sessionId}")
                 statusDetail = "Session created (${serverInfo.sessionId}). Connecting signaling..."
                 connectSignaling(serverInfo)
             }.onFailure { ex ->
@@ -241,25 +257,37 @@ class MainActivity : ComponentActivity() {
         connectionState = ConnectionState.SIGNALING
         statusDetail = "Connecting to signaling server ${serverInfo.host}:${serverInfo.port}..."
 
-        // Ensure PeerConnection is ready
-        peerConnectionWrapper?.createPeerConnection()
+        try {
+            CrashDiagnostics.setStage(
+                "SIGNALING_CONNECT_START host=${serverInfo.host}:${serverInfo.port} sessionId=${serverInfo.sessionId}"
+            )
 
-        signalingClient?.disconnect()
-        signalingClient = GfnSignalingClient(
-            host = serverInfo.host,
-            port = serverInfo.port,
-            secure = serverInfo.secure,
-            resourcePath = serverInfo.resourcePath,
-            sessionId = serverInfo.sessionId,
-            listener = signalingListener
-        ).apply {
-            connect()
+            // Ensure PeerConnection is ready
+            peerConnectionWrapper?.createPeerConnection()
+            CrashDiagnostics.setStage("PEER_CONNECTION_CREATED")
+
+            signalingClient?.disconnect()
+            signalingClient = GfnSignalingClient(
+                host = serverInfo.host,
+                port = serverInfo.port,
+                secure = serverInfo.secure,
+                resourcePath = serverInfo.resourcePath,
+                sessionId = serverInfo.sessionId,
+                listener = signalingListener
+            ).apply {
+                connect()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Signaling setup failed", e)
+            errorMessage = "Signaling setup failed: ${e.localizedMessage}"
+            connectionState = ConnectionState.DISCONNECTED
         }
     }
 
     private val signalingListener = object : GfnSignalingClient.Listener {
         override fun onSignalingConnected() {
             runOnUiThread {
+                CrashDiagnostics.setStage("SIGNALING_CONNECTED")
                 statusDetail = "Signaling connected. Awaiting SDP offer..."
             }
         }
@@ -466,6 +494,36 @@ class MainActivity : ComponentActivity() {
                                 .verticalScroll(rememberScrollState())
                                 .padding(10.dp)
                         )
+                    }
+                }
+
+                // Persisted crash banner from the previous run (record is cleared
+                // from prefs as soon as it is read; Close just hides the card).
+                lastCrash?.let { crash ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xCC4E342E)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "Last crash: $crash",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .heightIn(max = 240.dp)
+                                    .verticalScroll(rememberScrollState())
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Button(
+                                onClick = { lastCrash = null },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8D6E63))
+                            ) {
+                                Text("Close", color = Color.White)
+                            }
+                        }
                     }
                 }
 

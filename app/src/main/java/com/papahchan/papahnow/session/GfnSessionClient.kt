@@ -1,6 +1,7 @@
 package com.papahchan.papahnow.session
 
 import android.util.Log
+import com.papahchan.papahnow.diagnostics.CrashDiagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -30,7 +31,9 @@ data class SessionResponse(
 
 @Serializable
 data class SessionData(
-    @SerialName("sessionId") val sessionId: String,
+    // Default "" so a malformed or absent sessionId can never fail the decode;
+    // downstream code handles an empty id explicitly instead.
+    @SerialName("sessionId") val sessionId: String = "",
     @SerialName("state") val state: String? = null,
     // Numeric session status. 2/3 mean ready (NanaPlay READY_SESSION_STATUSES); the
     // string `state` is unreliable for this.
@@ -47,11 +50,13 @@ data class SessionControlInfo(
 
 @Serializable
 data class ConnectionInfoItem(
-    @SerialName("usage") val usage: Int, // 14 = WebSocket Signaling, 2/17 = Media
+    // Defaults so a missing/malformed field can never fail the whole decode of
+    // the session response; consumers validate before use instead.
+    @SerialName("usage") val usage: Int = 0, // 14 = WebSocket Signaling, 2/17 = Media
     // Non-signaling entries can carry a null ip (classic routing), so decode must not
     // fail here; the signaling lookup validates it instead.
     @SerialName("ip") val ip: String? = null,
-    @SerialName("port") val port: Int,
+    @SerialName("port") val port: Int? = 0,
     @SerialName("appLevelProtocol") val appLevelProtocol: Int = 5, // 5 = WSS
     @SerialName("resourcePath") val resourcePath: String? = null
 )
@@ -381,6 +386,7 @@ class GfnSessionClient(
             httpClient.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (response.isSuccessful) {
+                    CrashDiagnostics.setStage("CLAIM_DONE sessionId=$sessionId")
                     Log.i(TAG, "Session claim accepted: HTTP ${response.code}")
                 } else {
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
@@ -495,6 +501,9 @@ class GfnSessionClient(
                         "ready=${session.isReady()}"
                 )
             }
+            if (session.isReady()) {
+                CrashDiagnostics.setStage("POLL_READY status=${session.status}")
+            }
             Log.i(
                 TAG,
                 "Polling ended after $retries attempt(s): state=${session.state}, " +
@@ -525,12 +534,12 @@ class GfnSessionClient(
                 ?: session.claimHost()
                 ?: return@withContext Result.failure(Exception("No usable signaling host in connectionInfo: $connectionList"))
             val secure = signalingInfo.appLevelProtocol == 5 // 5 = wss
-            Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
+            Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port ?: 0}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
 
             Result.success(
                 SignalingServerInfo(
                     host = host,
-                    port = signalingInfo.port,
+                    port = signalingInfo.port ?: 0,
                     secure = secure,
                     resourcePath = signalingInfo.resourcePath,
                     sessionId = session.sessionId
