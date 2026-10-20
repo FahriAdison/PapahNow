@@ -1,5 +1,6 @@
 package com.papahchan.papahnow
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -56,6 +57,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.webrtc.PeerConnection
 import org.webrtc.VideoTrack
+import java.util.UUID
 
 enum class ConnectionState(val label: String) {
     DISCONNECTED("Disconnected"),
@@ -70,10 +72,31 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "PapahNowMain"
+        private const val STABLE_DEVICE_ID_PREFS = "papahnow_device_id"
+        private const val STABLE_DEVICE_ID_KEY = "papahnow_device_id"
     }
 
     private val authManager = GfnAuthManager()
-    private val sessionClient = GfnSessionClient()
+    // Lazy so getSharedPreferences runs after onCreate, not during construction.
+    // deviceHashId must be stable per install: CloudMatch sees the device identity
+    // as (x-device-id header, deviceHashId body field) and a random-per-process
+    // UUID is a plausible trigger for server-side session-state confusion.
+    private val sessionClient: GfnSessionClient by lazy {
+        GfnSessionClient(deviceHashId = persistedDeviceId())
+    }
+
+    /**
+     * Stable per-install device id for BOTH the x-device-id header and the
+     * deviceHashId body field: generated once, then reused across app restarts.
+     */
+    private fun persistedDeviceId(): String {
+        val prefs = getSharedPreferences(STABLE_DEVICE_ID_PREFS, Context.MODE_PRIVATE)
+        val existing = prefs.getString(STABLE_DEVICE_ID_KEY, null)
+        if (!existing.isNullOrBlank()) return existing
+        val fresh = UUID.randomUUID().toString()
+        prefs.edit().putString(STABLE_DEVICE_ID_KEY, fresh).commit()
+        return fresh
+    }
 
     private var signalingClient: GfnSignalingClient? = null
     private var peerConnectionWrapper: GfnPeerConnection? = null
