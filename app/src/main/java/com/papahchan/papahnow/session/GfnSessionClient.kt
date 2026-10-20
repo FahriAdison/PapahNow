@@ -240,7 +240,8 @@ class GfnSessionClient(
             put("accountLinked", true)
             put("userAge", 26)
             put("partnerCustomData", "")
-            put("enablePersistingInGameSettings", false)
+            // NanaPlay CloudMatchDesktopIdentity.PERSIST_GAME_SETTINGS = true.
+            put("enablePersistingInGameSettings", true)
             put("secureRTSPSupported", false)
             put("metaData", buildJsonArray {
                 add(buildJsonObject {
