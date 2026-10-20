@@ -29,6 +29,12 @@ class GfnSignalingClient(
 
     companion object {
         private const val TAG = "GfnSignaling"
+
+        // WebRTC handshake values from the browser/NanaPlay client.
+        private const val SIGNALING_VERSION = "2"
+        private const val SIGNALING_ORIGIN = "https://play.geforcenow.com"
+        private const val SIGNALING_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
     }
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -49,7 +55,7 @@ class GfnSignalingClient(
         // (resourcePath belongs to classic RTSP sessions and is intentionally ignored.)
         val basePath = "/nvst"
 
-        val urlBuilder = StringBuilder("$scheme://$host:$port$basePath/sign_in?peer_id=$peerName&version=3.0&peer_role=1")
+        val urlBuilder = StringBuilder("$scheme://$host:$port$basePath/sign_in?peer_id=$peerName&version=$SIGNALING_VERSION&peer_role=1")
         if (!sessionId.isNullOrEmpty()) {
             urlBuilder.append("&pairing_id=").append(sessionId)
         }
@@ -61,8 +67,10 @@ class GfnSignalingClient(
         Log.i(TAG, "Connecting to signaling server: $fullUrl (peerName: $peerName)")
 
         val requestBuilder = Request.Builder().url(fullUrl)
+            .addHeader("Origin", SIGNALING_ORIGIN)
+            .addHeader("User-Agent", SIGNALING_USER_AGENT)
         if (!sessionId.isNullOrEmpty()) {
-            // Match GFN subprotocol pattern: x-nv-sessionid.<sessionId>
+            // Required for the handshake: the server rejects requests without it.
             requestBuilder.addHeader("Sec-WebSocket-Protocol", "x-nv-sessionid.$sessionId")
         }
 
