@@ -17,6 +17,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -278,15 +279,45 @@ class GfnSessionClient(
         }
     }
 
-    /** Host of the assigned streaming server, used to address the claim request. */
-    private fun SessionData.claimHost(): String? =
-        signalingEntry()?.ip?.takeIf { it.isNotBlank() }
-            ?: signalingEntry()?.resourcePath
-                ?.substringAfter("://", "")
-                ?.substringBefore('/')
-                ?.substringBefore(':')
-                ?.takeIf { it.isNotBlank() }
-            ?: sessionControlInfo?.ip?.takeIf { it.isNotBlank() }
+    /** Rejects hosts that would produce an invalid URL (blank, leading/trailing dot, ".."). */
+    private fun usableSessionHost(value: String?): String? {
+        val host = value?.trim().orEmpty()
+        return host.takeIf {
+            it.isNotBlank() && !it.startsWith(".") && !it.endsWith(".") && !it.contains("..")
+        }
+    }
+
+    /** Parses the host out of a resourcePath URL (rtsp/rtsps/wss/https). */
+    private fun extractHostFromUrl(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        val host = runCatching { URI(raw).host }.getOrNull()
+        return usableSessionHost(host)
+    }
+
+    /**
+     * Host of the assigned streaming server (NanaPlay order): usage=14 ip, then the
+     * host parsed from its resourcePath, then sessionControlInfo.ip.
+     */
+    private fun SessionData.claimHost(): String? {
+        val signaling = signalingEntry()
+        val signalingIp = signaling?.ip
+        val resourcePath = signaling?.resourcePath
+        val resourceHost = extractHostFromUrl(resourcePath)
+        val controlIp = sessionControlInfo?.ip
+
+        Log.d(
+            TAG,
+            "Host candidates: signalingIp=$signalingIp (usable=${usableSessionHost(signalingIp)}), " +
+                "resourcePath=$resourcePath (host=$resourceHost), " +
+                "sessionControlIp=$controlIp (usable=${usableSessionHost(controlIp)})"
+        )
+
+        val chosen = usableSessionHost(signalingIp)
+            ?: resourceHost
+            ?: usableSessionHost(controlIp)
+        Log.i(TAG, "Selected session host: $chosen")
+        return chosen
+    }
 
     /**
      * Claims the created session before polling. The signaling endpoint rejects the
@@ -447,8 +478,11 @@ class GfnSessionClient(
             val signalingInfo = connectionList.find { it.usage == SIGNALING_USAGE_TYPE }
                 ?: return@withContext Result.failure(Exception("No signaling server (usage=$SIGNALING_USAGE_TYPE) found in connectionInfo: $connectionList"))
 
-            val host = signalingInfo.ip
-                ?: return@withContext Result.failure(Exception("Signaling server (usage=$SIGNALING_USAGE_TYPE) has no ip: $signalingInfo"))
+            // Validated with the same fallback chain as the claim host: a malformed
+            // usage=14 ip (e.g. ".cloudmatchbeta...") must not reach OkHttp as a URL.
+            val host = usableSessionHost(signalingInfo.ip)
+                ?: session.claimHost()
+                ?: return@withContext Result.failure(Exception("No usable signaling host in connectionInfo: $connectionList"))
             val secure = signalingInfo.appLevelProtocol == 5 // 5 = wss
             Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
 
