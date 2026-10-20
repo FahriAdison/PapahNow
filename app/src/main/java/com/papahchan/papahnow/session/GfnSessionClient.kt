@@ -34,7 +34,14 @@ data class SessionData(
     // Numeric session status. 2/3 mean ready (NanaPlay READY_SESSION_STATUSES); the
     // string `state` is unreliable for this.
     @SerialName("status") val status: Int? = null,
+    @SerialName("sessionControlInfo") val sessionControlInfo: SessionControlInfo? = null,
     @SerialName("connectionInfo") val connectionInfo: List<ConnectionInfoItem>? = null
+)
+
+/** Control endpoint of the assigned streaming server; its ip is used for claims. */
+@Serializable
+data class SessionControlInfo(
+    @SerialName("ip") val ip: String? = null
 )
 
 @Serializable
@@ -172,6 +179,157 @@ class GfnSessionClient(
         signalingEntry()?.ip != null && status != null && status in READY_SESSION_STATUSES
 
     /**
+     * sessionRequestData shared by session creation and claim. NanaPlay's claim body
+     * reuses this structure, wrapped in action=2 / data=RESUME.
+     */
+    private fun buildSessionRequestData(
+        appId: Int,
+        width: Int,
+        height: Int,
+        fps: Int
+    ): JsonObject {
+        val subSessionId = UUID.randomUUID().toString()
+        return buildJsonObject {
+            put("appId", appId)
+            put("internalTitle", JsonNull)
+            put("audioMode", 2)
+            put("remoteControllersBitmap", 0)
+            put("sdrHdrMode", 0)
+            put("networkTestSessionId", JsonNull)
+            put("availableSupportedControllers", buildJsonArray { })
+            put("parentSessionId", JsonNull)
+            put("clientVersion", CLIENT_VERSION)
+            put("deviceHashId", deviceHashId)
+            put("clientPlatformName", CLIENT_PLATFORM_NAME)
+            put("clientIdentification", CLIENT_IDENTIFICATION)
+            put("streamerVersion", 1)
+            put("clientTimezoneOffset", currentTimezoneOffsetMs())
+            put("surroundAudioInfo", 0)
+            put("clientDisplayHdrCapabilities", JsonNull)
+            put("accountLinked", true)
+            put("userAge", 26)
+            put("partnerCustomData", "")
+            put("enablePersistingInGameSettings", false)
+            put("secureRTSPSupported", false)
+            put("metaData", buildJsonArray {
+                add(buildJsonObject {
+                    put("key", "SubSessionId")
+                    put("value", subSessionId)
+                })
+                add(buildJsonObject {
+                    put("key", "wssignaling")
+                    put("value", "1")
+                })
+                add(buildJsonObject {
+                    put("key", "GSStreamerType")
+                    put("value", "WebRTC")
+                })
+                add(buildJsonObject {
+                    put("key", "networkType")
+                    put("value", "Unknown")
+                })
+                add(buildJsonObject {
+                    put("key", "ClientImeSupport")
+                    put("value", "0")
+                })
+                add(buildJsonObject {
+                    put("key", "clientPhysicalResolution")
+                    put("value", buildJsonObject {
+                        put("horizontalPixels", width)
+                        put("verticalPixels", height)
+                    }.toString())
+                })
+                add(buildJsonObject {
+                    put("key", "isAppLaunchEnabled")
+                    put("value", "True")
+                })
+                add(buildJsonObject {
+                    put("key", "surroundAudioInfo")
+                    put("value", "2")
+                })
+            })
+            put("clientRequestMonitorSettings", buildJsonArray {
+                add(buildJsonObject {
+                    put("monitorId", 0)
+                    put("positionX", 0)
+                    put("positionY", 0)
+                    put("widthInPixels", width)
+                    put("heightInPixels", height)
+                    put("dpi", 0)
+                    put("framesPerSecond", fps)
+                    put("sdrHdrMode", 0)
+                })
+            })
+            put("appLaunchMode", 1)
+            put("sdkVersion", "1.0")
+            put("enhancedStreamMode", 1)
+            put("useOps", true)
+            put("requestedStreamingFeatures", buildJsonObject {
+                put("reflex", false)
+                put("bitDepth", 0)
+                put("cloudGsync", false)
+                put("enabledL4S", false)
+                put("profile", 0)
+                put("fallbackToLogicalResolution", false)
+                put("chromaFormat", 0)
+                put("prefilterMode", 0)
+                put("hudStreamingMode", 0)
+            })
+        }
+    }
+
+    /** Host of the assigned streaming server, used to address the claim request. */
+    private fun SessionData.claimHost(): String? =
+        signalingEntry()?.ip?.takeIf { it.isNotBlank() }
+            ?: signalingEntry()?.resourcePath
+                ?.substringAfter("://", "")
+                ?.substringBefore('/')
+                ?.substringBefore(':')
+                ?.takeIf { it.isNotBlank() }
+            ?: sessionControlInfo?.ip?.takeIf { it.isNotBlank() }
+
+    /**
+     * Claims the created session before polling. The signaling endpoint rejects the
+     * WebSocket handshake (503) until the session is claimed.
+     */
+    private fun claimSession(
+        host: String,
+        sessionId: String,
+        authToken: String,
+        appId: Int,
+        width: Int,
+        height: Int,
+        fps: Int
+    ) {
+        val url = "https://$host/v2/session/$sessionId?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
+        val payload = buildJsonObject {
+            put("action", 2)
+            put("data", "RESUME")
+            put("sessionRequestData", buildSessionRequestData(appId, width, height, fps))
+            put("metaData", buildJsonArray { })
+        }.toString()
+
+        Log.i(TAG, "Claiming session $sessionId via $url")
+        Log.d(TAG, "Claim body: $payload")
+
+        val request = cloudmatchRequest(url, authToken)
+            .put(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                val responseBody = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    Log.i(TAG, "Session claim accepted: HTTP ${response.code}")
+                } else {
+                    Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Session claim request error", e)
+        }
+    }
+
+    /**
      * Requests a game streaming session from Cloudmatch API.
      *
      * @param authToken GFN JWT sent as `Authorization: GFNJWT <token>` (client token, not
@@ -187,95 +345,8 @@ class GfnSessionClient(
         val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
         // Query params required by the session endpoint, per browser capture.
         val endpoint = "$baseEndpoint?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
-        val subSessionId = UUID.randomUUID().toString()
         val payload = buildJsonObject {
-            put("sessionRequestData", buildJsonObject {
-                put("appId", appId)
-                put("internalTitle", JsonNull)
-                put("audioMode", 2)
-                put("remoteControllersBitmap", 0)
-                put("sdrHdrMode", 0)
-                put("networkTestSessionId", JsonNull)
-                put("availableSupportedControllers", buildJsonArray { })
-                put("parentSessionId", JsonNull)
-                put("clientVersion", CLIENT_VERSION)
-                put("deviceHashId", deviceHashId)
-                put("clientPlatformName", CLIENT_PLATFORM_NAME)
-                put("clientIdentification", CLIENT_IDENTIFICATION)
-                put("streamerVersion", 1)
-                put("clientTimezoneOffset", currentTimezoneOffsetMs())
-                put("surroundAudioInfo", 0)
-                put("clientDisplayHdrCapabilities", JsonNull)
-                put("accountLinked", true)
-                put("userAge", 26)
-                put("partnerCustomData", "")
-                put("enablePersistingInGameSettings", false)
-                put("secureRTSPSupported", false)
-                put("metaData", buildJsonArray {
-                    add(buildJsonObject {
-                        put("key", "SubSessionId")
-                        put("value", subSessionId)
-                    })
-                    add(buildJsonObject {
-                        put("key", "wssignaling")
-                        put("value", "1")
-                    })
-                    add(buildJsonObject {
-                        put("key", "GSStreamerType")
-                        put("value", "WebRTC")
-                    })
-                    add(buildJsonObject {
-                        put("key", "networkType")
-                        put("value", "Unknown")
-                    })
-                    add(buildJsonObject {
-                        put("key", "ClientImeSupport")
-                        put("value", "0")
-                    })
-                    add(buildJsonObject {
-                        put("key", "clientPhysicalResolution")
-                        put("value", buildJsonObject {
-                            put("horizontalPixels", width)
-                            put("verticalPixels", height)
-                        }.toString())
-                    })
-                    add(buildJsonObject {
-                        put("key", "isAppLaunchEnabled")
-                        put("value", "True")
-                    })
-                    add(buildJsonObject {
-                        put("key", "surroundAudioInfo")
-                        put("value", "2")
-                    })
-                })
-                put("clientRequestMonitorSettings", buildJsonArray {
-                    add(buildJsonObject {
-                        put("monitorId", 0)
-                        put("positionX", 0)
-                        put("positionY", 0)
-                        put("widthInPixels", width)
-                        put("heightInPixels", height)
-                        put("dpi", 0)
-                        put("framesPerSecond", fps)
-                        put("sdrHdrMode", 0)
-                    })
-                })
-                put("appLaunchMode", 1)
-                put("sdkVersion", "1.0")
-                put("enhancedStreamMode", 1)
-                put("useOps", true)
-                put("requestedStreamingFeatures", buildJsonObject {
-                    put("reflex", false)
-                    put("bitDepth", 0)
-                    put("cloudGsync", false)
-                    put("enabledL4S", false)
-                    put("profile", 0)
-                    put("fallbackToLogicalResolution", false)
-                    put("chromaFormat", 0)
-                    put("prefilterMode", 0)
-                    put("hudStreamingMode", 0)
-                })
-            })
+            put("sessionRequestData", buildSessionRequestData(appId, width, height, fps))
         }.toString()
 
         Log.i(TAG, "Requesting session from $endpoint...")
@@ -304,6 +375,20 @@ class GfnSessionClient(
             var sessionResp = json.decodeFromString<SessionResponse>(body)
             var session = sessionResp.session ?: return@withContext Result.failure(Exception("No session object in response: $body"))
 
+            // Claim as soon as the assigned server ip is known. Creation alone leaves
+            // the session unclaimed and the signaling handshake answers 503.
+            var claimed = false
+            fun tryClaim() {
+                if (claimed) return
+                val host = session.claimHost() ?: return
+                claimSession(host, session.sessionId, authToken, appId, width, height, fps)
+                claimed = true
+            }
+            tryClaim()
+            if (!claimed) {
+                Log.w(TAG, "No server ip in the create response yet; deferring claim until a poll returns one")
+            }
+
             // Poll until both readiness conditions hold (NanaPlay semantics): the
             // signaling entry (usage 14) has an ip, and the numeric status is 2/3.
             Log.i(
@@ -330,6 +415,7 @@ class GfnSessionClient(
 
                 sessionResp = json.decodeFromString<SessionResponse>(body)
                 session = sessionResp.session ?: session
+                tryClaim()
                 Log.i(
                     TAG,
                     "Poll $retries/$MAX_POLL_ATTEMPTS: state=${session.state}, " +
@@ -342,6 +428,9 @@ class GfnSessionClient(
                 "Polling ended after $retries attempt(s): state=${session.state}, " +
                     "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
             )
+            if (!claimed) {
+                Log.w(TAG, "Session was never claimed: the server ip never appeared in the response")
+            }
 
             // Raw connectionInfo (including fields we don't model) so classic-routing
             // responses can be inspected directly in Logcat.
