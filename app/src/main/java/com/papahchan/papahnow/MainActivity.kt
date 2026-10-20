@@ -213,7 +213,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Tokens must be plain JWT characters ([A-Za-z0-9\-_.]). A corrupted token
+     * (e.g. pasted with line breaks or truncated) previously built a malformed
+     * request and force-closed the app, so reject it here before any request.
+     */
+    private fun invalidTokenMessage(token: String): String? {
+        for ((index, c) in token.withIndex()) {
+            val ok = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == '-' || c == '_' || c == '.'
+            if (!ok) {
+                return "Token mengandung karakter tidak valid di posisi $index ('$c'). Salin ulang token secara utuh tanpa terpotong."
+            }
+        }
+        return null
+    }
+
     private fun createSessionAndConnect(authToken: String) {
+        invalidTokenMessage(authToken)?.let { message ->
+            Log.e(TAG, "Rejected malformed token before requesting a session")
+            errorMessage = message
+            connectionState = ConnectionState.DISCONNECTED
+            return
+        }
+
         connectionState = ConnectionState.CREATING_SESSION
         statusDetail = "Requesting session from cloudmatch..."
 
