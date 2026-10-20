@@ -103,6 +103,10 @@ class GfnSessionClient(
         // to ~30 minutes before giving up. Status=1 is queued, not an error.
         private const val MAX_POLL_ATTEMPTS = 900
         private const val POLL_INTERVAL_MS = 2000L
+        // Once the session is ready the zone base can start answering 500 while the
+        // claim/resume flow takes over. Five consecutive 500s means the endpoint is
+        // wedged, so stop instead of blind-polling for 30 minutes.
+        private const val MAX_CONSECUTIVE_POLL_500S = 5
 
         // BINARY HOST TEST: prod (NanaPlay's default host, GfnApi.kt
         // DEFAULT_STREAMING_SERVICE_URL) instead of the earlier ap-india
@@ -532,7 +536,8 @@ class GfnSessionClient(
         val host: String,
         val url: String,
         val httpCode: Int?,
-        val error: String? = null
+        val error: String? = null,
+        val responseBody: String = ""
     )
 
     /**
@@ -576,7 +581,7 @@ class GfnSessionClient(
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
                 }
                 Log.d(TAG, "Claim response body: $responseBody")
-                ClaimOutcome(host = host, url = url, httpCode = response.code)
+                ClaimOutcome(host = host, url = url, httpCode = response.code, responseBody = responseBody)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
@@ -620,6 +625,10 @@ class GfnSessionClient(
             append("  attempts: $claimAttempts, accepted: $accepted\n")
             append("  last host: ${claim.host}, HTTP: $http\n")
             append("  URL: PUT ${claim.url}\n")
+            if (!accepted && claim.responseBody.isNotBlank()) {
+                append("  Response:\n")
+                append(claim.responseBody).append('\n')
+            }
         }
         append("Polls:\n")
         if (pollLines.isEmpty()) {
@@ -712,7 +721,6 @@ class GfnSessionClient(
             // Claim only once genuinely ready (NanaPlay claimSession semantics):
             // status 2/3 AND a usage=14 signaling ip. Claiming straight after create
             // while status=1 (queued) is rejected with HTTP 400.
-            var claimAccepted = false
             var claimed = false
             var claimOutcome: ClaimOutcome? = null
             var claimAttempts = 0
@@ -722,6 +730,8 @@ class GfnSessionClient(
             var lastPollUrl = ""
             var lastPollBody = ""
             var terminalStatus: Int? = null
+            var consecutivePoll500s = 0
+            var consecutive500Abort = false
             while (retries < MAX_POLL_ATTEMPTS) {
                 delay(POLL_INTERVAL_MS)
                 retries++
@@ -742,9 +752,21 @@ class GfnSessionClient(
                     pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, status=n/a, connectionInfo=no, url=$pollUrl"
                     Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
                     val failedHost = runCatching { URI(pollUrl).host }.getOrNull() ?: pollUrl
+                    if (response.code == 500) {
+                        consecutivePoll500s++
+                        if (consecutivePoll500s >= MAX_CONSECUTIVE_POLL_500S) {
+                            consecutive500Abort = true
+                            pollLines += "Stopped: $consecutivePoll500s consecutive HTTP 500 poll responses"
+                            onProgress("Session poll stopped after $consecutivePoll500s consecutive HTTP 500 @ $failedHost")
+                            break
+                        }
+                    } else {
+                        consecutivePoll500s = 0
+                    }
                     onProgress("Session poll failed (HTTP ${response.code}) @ $failedHost; retrying...")
                     continue
                 }
+                consecutivePoll500s = 0
 
                 sessionResp = json.decodeFromString<SessionResponse>(body)
                 // Merge: queued responses omit connectionInfo/sessionControlInfo, so a
@@ -757,7 +779,7 @@ class GfnSessionClient(
                 Log.i(
                     TAG,
                     "Poll $retries/$MAX_POLL_ATTEMPTS: state=${session.state}, " +
-                    "status=${session.status}, queuePosition=${session.effectiveQueuePosition()}, " +
+                        "status=${session.status}, queuePosition=${session.effectiveQueuePosition()}, " +
                         "seatSetupStep=${session.seatSetupInfo?.seatSetupStep}, " +
                         "signalingIp=${session.signalingEntry()?.ip}, ready=${session.isReady()}, " +
                         "claimed=$claimed"
@@ -771,17 +793,11 @@ class GfnSessionClient(
                 }
 
                 if (!session.isReady()) {
-                    // Back in the queue/not-ready state: an earlier claim acceptance is
-                    // no longer sufficient, so retry the claim once ready again.
-                    claimAccepted = false
                     onProgress(session.progressText())
-                } else if (claimAccepted) {
-                    // The claim PUT succeeded and the session is still ready on the
-                    // next poll: claim confirmed, signaling may connect.
-                    claimed = true
-                    onProgress("Session claimed. Connecting signaling...")
-                    break
                 } else {
+                    // Ready: stop polling and claim now (NanaPlay order). A 2xx claim
+                    // is final — proceed straight to signaling with this ready session
+                    // instead of polling the zone base again.
                     val host = session.claimHost()
                     if (host == null) {
                         pollLines += "Claim skipped: ready but no usable server host"
@@ -804,11 +820,12 @@ class GfnSessionClient(
                         pollLines += "Claim #$claimAttempts: HTTP $http, accepted=$accepted, " +
                             "host=$host, url=${outcome.url}"
                         if (accepted) {
-                            claimAccepted = true
-                            onProgress("Claim accepted (HTTP ${outcome.httpCode}); verifying session...")
+                            claimed = true
+                            onProgress("Session claimed (HTTP ${outcome.httpCode}). Connecting signaling...")
+                            break
                         } else {
-                            // Not ready or rejected: keep polling and retry on the next
-                            // ready poll instead of aborting the whole flow.
+                            // Claim not ready/rejected: keep polling and retry the claim
+                            // when the session is ready again.
                             onProgress("Claim failed ($http); continuing polling...")
                         }
                     }
@@ -829,13 +846,15 @@ class GfnSessionClient(
                     "terminalStatus=$terminalStatus"
             )
 
-            // A queued session is never an error. The final failure is only a
-            // terminal allocation or an exhausted polling budget (v26 diagnostic).
+            // A queued session is never an error. The final failure is a terminal
+            // allocation, five consecutive HTTP 500 polls, or an exhausted budget.
             if (terminalStatus != null || !session.isReady() || !claimed) {
-                val stopReason = if (terminalStatus != null) {
-                    "terminal status=$terminalStatus"
-                } else {
-                    "polling limit reached after $retries attempt(s)"
+                val stopReason = when {
+                    terminalStatus != null -> "terminal status=$terminalStatus"
+                    consecutive500Abort ->
+                        "$consecutivePoll500s consecutive HTTP 500 poll responses " +
+                            "(claim outcome and last 500 body below)"
+                    else -> "polling limit reached after $retries attempt(s)"
                 }
                 return@withContext Result.failure(
                     Exception(
