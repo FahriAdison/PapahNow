@@ -190,7 +190,7 @@ class GfnSessionClient(
         fps: Int
     ): JsonObject {
         val subSessionId = UUID.randomUUID().toString()
-        return buildJsonObject {
+        val data = buildJsonObject {
             put("appId", appId)
             put("internalTitle", JsonNull)
             put("audioMode", 2)
@@ -277,6 +277,28 @@ class GfnSessionClient(
                 put("hudStreamingMode", 0)
             })
         }
+        logSessionRequestData(data)
+        return data
+    }
+
+    /** Verifies the shared builder really populated every field CloudMatch reads. */
+    private fun logSessionRequestData(data: JsonObject) {
+        val required = listOf(
+            "appId", "accountLinked", "userAge", "clientPlatformName", "clientVersion",
+            "deviceHashId", "appLaunchMode", "metaData", "clientRequestMonitorSettings",
+            "requestedStreamingFeatures"
+        )
+        val missing = required.filter { data[it] == null }
+        if (missing.isNotEmpty()) {
+            Log.e(TAG, "sessionRequestData missing required fields: $missing")
+        }
+        Log.i(
+            TAG,
+            "sessionRequestData: accountLinked=${data["accountLinked"]}, userAge=${data["userAge"]}, " +
+                "clientPlatformName=${data["clientPlatformName"]}, clientVersion=${data["clientVersion"]}, " +
+                "deviceHashId=${data["deviceHashId"]}, appLaunchMode=${data["appLaunchMode"]}, " +
+                "keys=${data.keys.size}"
+        )
     }
 
     /** Rejects hosts that would produce an invalid URL (blank, leading/trailing dot, ".."). */
@@ -341,12 +363,17 @@ class GfnSessionClient(
         }.toString()
 
         Log.i(TAG, "Claiming session $sessionId via $url")
-        Log.d(TAG, "Claim body: $payload")
+        Log.d(TAG, "PUT $url")
+        Log.d(TAG, "Request body: $payload")
 
-        val request = cloudmatchRequest(url, authToken)
-            .put(payload.toRequestBody("application/json".toMediaType()))
-            .build()
         try {
+            val request = cloudmatchRequest(url, authToken)
+                .put(payload.toRequestBody("application/json".toMediaType()))
+                .build()
+            request.headers.forEach { (name, value) ->
+                val logged = if (name.equals("Authorization", ignoreCase = true)) maskAuthorization(value) else value
+                Log.d(TAG, "  $name: $logged")
+            }
             httpClient.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (response.isSuccessful) {
@@ -354,6 +381,7 @@ class GfnSessionClient(
                 } else {
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
                 }
+                Log.d(TAG, "Claim response body: $responseBody")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
