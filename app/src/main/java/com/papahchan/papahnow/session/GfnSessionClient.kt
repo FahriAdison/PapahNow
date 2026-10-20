@@ -584,24 +584,6 @@ class GfnSessionClient(
         }
     }
 
-    /** Mirrors NanaPlay isZoneHostname(): routing hosts are never polled directly. */
-    private fun isZoneHostname(value: String): Boolean =
-        value.contains("cloudmatchbeta.nvidiagrid.net") || value.contains("cloudmatch.nvidiagrid.net")
-
-    /**
-     * Mirrors NanaPlay resolvePollStopBase(): while the configured base is a
-     * cloudmatchbeta zone, switch polling to https://<assigned server host> as soon
-     * as one is known; otherwise keep polling the original base.
-     */
-    private fun pollBase(serverHost: String?): String {
-        val host = serverHost?.takeIf { it.isNotBlank() } ?: return cloudmatchUrl.trimEnd('/')
-        return if (cloudmatchUrl.contains("cloudmatchbeta.nvidiagrid.net") && !isZoneHostname(host)) {
-            "https://$host"
-        } else {
-            cloudmatchUrl.trimEnd('/')
-        }
-    }
-
     /**
      * Polling diagnostic in the same labeled style as the create-failure banner:
      * stop reason, create response, claim status, per-poll summary and last poll body.
@@ -672,6 +654,10 @@ class GfnSessionClient(
         // spontaneous ~11:03 regression (suspected server-side dedup/throttle).
         val clientId = UUID.randomUUID().toString()
         val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
+        // Polling stays on the zone base for the whole flow. The assigned server
+        // host (claimHost()) is only for the claim PUT: some raw server IPs answer
+        // GET /v2/session/{id} with HTTP 500 even after the session is ready.
+        val pollBaseEndpoint = cloudmatchUrl.trimEnd('/')
         // Query params required by the session endpoint, per browser capture.
         val endpoint = "$baseEndpoint?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
         val payload = buildJsonObject {
@@ -740,10 +726,10 @@ class GfnSessionClient(
                 delay(POLL_INTERVAL_MS)
                 retries++
 
-                // NanaPlay poll parity: as soon as a server host is known (from the
-                // create response or any poll), poll https://<host> directly instead
-                // of the cloudmatchbeta zone base.
-                val pollUrl = "${pollBase(session.claimHost())}/v2/session/${session.sessionId}"
+                // Poll the fixed zone base for the entire loop. claimHost() is
+                // intentionally NOT used here: switching to the raw server ip made
+                // ready-session polls fail with HTTP 500 (v27).
+                val pollUrl = "$pollBaseEndpoint/v2/session/${session.sessionId}"
                 lastPollUrl = pollUrl
                 val pollReq = cloudmatchRequest(pollUrl, authToken, clientId)
                     .get()
@@ -755,7 +741,8 @@ class GfnSessionClient(
                 if (!response.isSuccessful) {
                     pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, status=n/a, connectionInfo=no, url=$pollUrl"
                     Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
-                    onProgress("Session poll failed (HTTP ${response.code}); retrying...")
+                    val failedHost = runCatching { URI(pollUrl).host }.getOrNull() ?: pollUrl
+                    onProgress("Session poll failed (HTTP ${response.code}) @ $failedHost; retrying...")
                     continue
                 }
 
