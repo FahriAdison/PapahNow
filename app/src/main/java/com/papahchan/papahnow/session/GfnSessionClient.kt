@@ -915,12 +915,16 @@ class GfnSessionClient(
             // entries carry 6, not 5): NanaPlay hardcodes wss:// and the HTTPS web
             // client cannot open ws://. Do not relax the network security policy.
             val secure = true
-            Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port ?: 0}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
+            // The WebSocket signaling entrypoint is always 443. connectionInfo's
+            // usage=14 port (e.g. 48322) belongs to a different transport and routed
+            // the handshake to a 404.
+            val signalingPort = 443
+            Log.i(TAG, "Signaling server found: host=$host, port=$signalingPort, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
 
             Result.success(
                 SignalingServerInfo(
                     host = host,
-                    port = signalingInfo.port ?: 0,
+                    port = signalingPort,
                     secure = secure,
                     resourcePath = signalingInfo.resourcePath,
                     sessionId = session.sessionId

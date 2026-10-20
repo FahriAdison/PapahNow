@@ -31,7 +31,7 @@ class GfnSignalingClient(
         private const val TAG = "GfnSignaling"
 
         // WebRTC handshake values from the browser/NanaPlay client.
-        private const val SIGNALING_VERSION = "2"
+        private const val SIGNALING_VERSION = "3.0"
         private const val SIGNALING_ORIGIN = "https://play.geforcenow.com"
         private const val SIGNALING_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
