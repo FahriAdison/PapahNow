@@ -90,7 +90,9 @@ class GfnSessionClient(
         // Body identity, matching the proven NanaPlay client. clientVersion stays "30.0"
         // (Cloudmatch client identity); the Android app version goes in nv-client-version.
         private const val CLIENT_ID = "ec7e38d4-03af-4b58-b131-cfb0495903ab"
-        private const val CLIENT_STREAMER = "NVIDIA-CLASSIC"
+        // WEBRTC keeps us on the WebSocket signaling path (usage=14). NVIDIA-CLASSIC
+        // makes Cloudmatch return the RTSP classic path instead.
+        private const val CLIENT_STREAMER = "WEBRTC"
         private const val CLIENT_VERSION = "30.0"
         private const val CLIENT_PLATFORM_NAME = "android"
         private const val CLIENT_IDENTIFICATION = "GFN-PC"
