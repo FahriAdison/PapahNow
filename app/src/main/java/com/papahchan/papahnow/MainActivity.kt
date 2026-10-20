@@ -74,16 +74,12 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "PapahNowMain"
         private const val STABLE_DEVICE_ID_PREFS = "papahnow_device_id"
         private const val STABLE_DEVICE_ID_KEY = "papahnow_device_id"
+        private const val APP_PREFS = "papahnow_prefs"
+        private const val CLOUDMATCH_ZONE_KEY = "cloudmatch_zone"
+        private const val DEFAULT_CLOUDMATCH_ZONE = "prod"
     }
 
     private val authManager = GfnAuthManager()
-    // Lazy so getSharedPreferences runs after onCreate, not during construction.
-    // deviceHashId must be stable per install: CloudMatch sees the device identity
-    // as (x-device-id header, deviceHashId body field) and a random-per-process
-    // UUID is a plausible trigger for server-side session-state confusion.
-    private val sessionClient: GfnSessionClient by lazy {
-        GfnSessionClient(deviceHashId = persistedDeviceId())
-    }
 
     /**
      * Stable per-install device id for BOTH the x-device-id header and the
@@ -96,6 +92,12 @@ class MainActivity : ComponentActivity() {
         val fresh = UUID.randomUUID().toString()
         prefs.edit().putString(STABLE_DEVICE_ID_KEY, fresh).commit()
         return fresh
+    }
+
+    /** Cloudmatch base for the selected zone; empty zone falls back to prod. */
+    private fun cloudmatchBaseUrl(): String {
+        val zone = cloudmatchZone.trim().ifBlank { DEFAULT_CLOUDMATCH_ZONE }
+        return "https://$zone.cloudmatchbeta.nvidiagrid.net"
     }
 
     private var signalingClient: GfnSignalingClient? = null
@@ -111,6 +113,7 @@ class MainActivity : ComponentActivity() {
     private var authTokenInput by mutableStateOf("")
     private var directSignalingUrlInput by mutableStateOf("")
     private var authCodeInput by mutableStateOf("")
+    private var cloudmatchZone by mutableStateOf(DEFAULT_CLOUDMATCH_ZONE)
     private var showDebugPanel by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,6 +122,11 @@ class MainActivity : ComponentActivity() {
         // Crash diagnostics FIRST: even this init code must be covered by the
         // global handler before anything else can throw.
         CrashDiagnostics.install(applicationContext)
+
+        // Zone is persisted so the selected route survives app restarts.
+        cloudmatchZone = getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+            .getString(CLOUDMATCH_ZONE_KEY, DEFAULT_CLOUDMATCH_ZONE)
+            ?: DEFAULT_CLOUDMATCH_ZONE
 
         // Read (and clear) what the previous run left behind, so a death without
         // a catchable exception is still visible via the persisted stage record.
@@ -260,10 +268,17 @@ class MainActivity : ComponentActivity() {
         }
 
         connectionState = ConnectionState.CREATING_SESSION
-        statusDetail = "Requesting session from cloudmatch..."
+        statusDetail = "Requesting session from ${cloudmatchBaseUrl()}..."
 
         CoroutineScope(Dispatchers.Main).launch {
-            val result = sessionClient.createStreamingSession(authToken)
+            // Built per Connect so a zone change applies without restarting the app.
+            val sessionClient = GfnSessionClient(
+                cloudmatchUrl = cloudmatchBaseUrl(),
+                deviceHashId = persistedDeviceId()
+            )
+            val result = sessionClient.createStreamingSession(authToken) { progress ->
+                runOnUiThread { statusDetail = progress }
+            }
             result.onSuccess { serverInfo ->
                 CrashDiagnostics.setStage("CREATE_OK sessionId=${serverInfo.sessionId}")
                 statusDetail = "Session created (${serverInfo.sessionId}). Connecting signaling..."
@@ -622,6 +637,28 @@ class MainActivity : ComponentActivity() {
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
                             )
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Cloudmatch zone routing (e.g. eu-netherlands-south).
+                            OutlinedTextField(
+                                value = cloudmatchZone,
+                                onValueChange = { value ->
+                                    cloudmatchZone = value
+                                    getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+                                        .edit()
+                                        .putString(CLOUDMATCH_ZONE_KEY, value)
+                                        .apply()
+                                },
+                                label = { Text("Zone (empty = prod)") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = Color(0xFF76B900)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
                             Spacer(modifier = Modifier.height(8.dp))
 
                             // Direct Signaling URL

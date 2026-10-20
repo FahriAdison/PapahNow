@@ -29,6 +29,16 @@ data class SessionResponse(
     @SerialName("requestStatus") val requestStatus: JsonObject? = null
 )
 
+/** Queue/seat provisioning counters from the `session.seatSetupInfo` object. */
+@Serializable
+data class SeatSetupInfo(
+    @SerialName("seatSetupStep") val seatSetupStep: Int? = null,
+    // Milliseconds, matching NanaPlay's "est. Ns" formatter.
+    @SerialName("seatSetupEta") val seatSetupEta: Long? = null,
+    // Some responses nest the queue counter here instead of at the session root.
+    @SerialName("queuePosition") val queuePosition: Int? = null
+)
+
 @Serializable
 data class SessionData(
     // Default "" so a malformed or absent sessionId can never fail the decode;
@@ -39,7 +49,11 @@ data class SessionData(
     // string `state` is unreliable for this.
     @SerialName("status") val status: Int? = null,
     @SerialName("sessionControlInfo") val sessionControlInfo: SessionControlInfo? = null,
-    @SerialName("connectionInfo") val connectionInfo: List<ConnectionInfoItem>? = null
+    @SerialName("connectionInfo") val connectionInfo: List<ConnectionInfoItem>? = null,
+    // Queue telemetry: present while status=1 (queued). queuePosition sits at the
+    // session root; seatSetupStep/seatSetupEta are nested under seatSetupInfo.
+    @SerialName("queuePosition") val queuePosition: Int? = null,
+    @SerialName("seatSetupInfo") val seatSetupInfo: SeatSetupInfo? = null
 )
 
 /** Control endpoint of the assigned streaming server; its ip is used for claims. */
@@ -85,8 +99,9 @@ class GfnSessionClient(
         // NanaPlay GfnApi READY_SESSION_STATUSES: session is ready when its numeric
         // status is 2 or 3.
         private val READY_SESSION_STATUSES = setOf(2, 3)
-        // Queues can take minutes: poll every 2s, up to 60 times (~2 minutes).
-        private const val MAX_POLL_ATTEMPTS = 60
+        // Queues routinely run much longer than two minutes: poll every 2s for up
+        // to ~30 minutes before giving up. Status=1 is queued, not an error.
+        private const val MAX_POLL_ATTEMPTS = 900
         private const val POLL_INTERVAL_MS = 2000L
 
         // BINARY HOST TEST: prod (NanaPlay's default host, GfnApi.kt
@@ -424,6 +439,94 @@ class GfnSessionClient(
         return chosen
     }
 
+    private fun SessionData.effectiveQueuePosition(): Int? =
+        queuePosition ?: seatSetupInfo?.queuePosition
+
+    /**
+     * Status text for the in-app progress line. Mirrors NanaPlay's queue display:
+     * "Queue position N · est. Ns" (seatSetupEta is milliseconds) while queued,
+     * and never treats status=1 as an error.
+     */
+    private fun SessionData.progressText(): String {
+        val step = seatSetupInfo?.seatSetupStep
+        // NanaPlay hides the queue counter once seatSetupStep reaches 5.
+        val position = effectiveQueuePosition()?.takeIf { it > 0 && step != 5 }
+        val etaSeconds = seatSetupInfo?.seatSetupEta
+            ?.takeIf { it > 0 }
+            ?.let { (it + 999) / 1000 }
+        return when {
+            position != null ->
+                "Queue position $position" + (etaSeconds?.let { " · est. ${it}s" } ?: "")
+            step == 1 -> "Waiting for a rig"
+            status == 0 || status == 1 -> "Checking queue"
+            isReady() -> "Session ready (status=$status). Claiming..."
+            status != null -> "Session status=$status"
+            else -> "Waiting for session..."
+        }
+    }
+
+    /**
+     * Statuses outside {0 unknown, 1 queued, 2/3 ready} mean the allocation is
+     * over (e.g. status 4); polling it further can never recover.
+     */
+    private fun SessionData.isTerminal(): Boolean = status != null && status !in 0..3
+
+    /**
+     * Merges a poll response onto the last known session. Queued responses omit
+     * connectionInfo/sessionControlInfo, so a plain replace would erase the
+     * server host learned from an earlier response. Null fields always keep the
+     * previous value; connection entries merge per usage.
+     */
+    private fun SessionData.mergedWith(fresh: SessionData): SessionData = copy(
+        sessionId = fresh.sessionId.ifBlank { sessionId },
+        state = fresh.state ?: state,
+        status = fresh.status ?: status,
+        sessionControlInfo = mergeSessionControlInfo(fresh.sessionControlInfo, sessionControlInfo),
+        connectionInfo = mergeConnectionInfo(fresh.connectionInfo, connectionInfo),
+        queuePosition = fresh.queuePosition ?: queuePosition,
+        seatSetupInfo = mergeSeatSetupInfo(fresh.seatSetupInfo, seatSetupInfo)
+    )
+
+    private fun mergeSessionControlInfo(
+        fresh: SessionControlInfo?,
+        existing: SessionControlInfo?
+    ): SessionControlInfo? = when {
+        fresh == null -> existing
+        existing == null -> fresh
+        else -> existing.copy(ip = fresh.ip ?: existing.ip)
+    }
+
+    private fun mergeSeatSetupInfo(fresh: SeatSetupInfo?, existing: SeatSetupInfo?): SeatSetupInfo? = when {
+        fresh == null -> existing
+        existing == null -> fresh
+        else -> SeatSetupInfo(
+            seatSetupStep = fresh.seatSetupStep ?: existing.seatSetupStep,
+            seatSetupEta = fresh.seatSetupEta ?: existing.seatSetupEta,
+            queuePosition = fresh.queuePosition ?: existing.queuePosition
+        )
+    }
+
+    private fun mergeConnectionInfo(
+        fresh: List<ConnectionInfoItem>?,
+        existing: List<ConnectionInfoItem>?
+    ): List<ConnectionInfoItem>? {
+        if (fresh == null) return existing
+        if (existing == null) return fresh
+        val freshByUsage = fresh.associateBy { it.usage }
+        val existingUsages = existing.map { it.usage }.toSet()
+        val merged = existing.map { old ->
+            freshByUsage[old.usage]?.mergedOver(old) ?: old
+        }
+        return merged + fresh.filter { it.usage !in existingUsages }
+    }
+
+    /** Field-level null preservation for a connection entry seen in both responses. */
+    private fun ConnectionInfoItem.mergedOver(old: ConnectionInfoItem): ConnectionInfoItem = copy(
+        ip = ip ?: old.ip,
+        port = port?.takeIf { it > 0 } ?: old.port,
+        resourcePath = resourcePath ?: old.resourcePath
+    )
+
     /** Result of the claim attempt, retained for the polling diagnostic banner. */
     private data class ClaimOutcome(
         val host: String,
@@ -433,8 +536,9 @@ class GfnSessionClient(
     )
 
     /**
-     * Claims the created session before polling. The signaling endpoint rejects the
-     * WebSocket handshake (503) until the session is claimed.
+     * Claims the session once CloudMatch reports it ready (status 2/3 and a
+     * usage=14 signaling ip). The signaling endpoint rejects the WebSocket
+     * handshake (503) until the session is claimed.
      */
     private fun claimSession(
         host: String,
@@ -500,29 +604,39 @@ class GfnSessionClient(
 
     /**
      * Polling diagnostic in the same labeled style as the create-failure banner:
-     * create response, claim status, per-poll summary and last poll body.
+     * stop reason, create response, claim status, per-poll summary and last poll body.
      */
     private fun buildNoConnectionInfoReport(
         session: SessionData,
         createUrl: String,
         createBody: String,
         claim: ClaimOutcome?,
+        claimAttempts: Int,
         pollLines: List<String>,
         lastPollUrl: String,
-        lastPollBody: String
+        lastPollBody: String,
+        stopReason: String
     ): String = buildString {
-        append("Session created but no connectionInfo received (state=${session.state}, status=${session.status})\n")
+        append("Session not ready: no claimable connectionInfo received\n")
+        append("Stop reason: $stopReason\n")
+        append(
+            "Queue: position=${session.effectiveQueuePosition()}, " +
+                "seatSetupStep=${session.seatSetupInfo?.seatSetupStep}, " +
+                "seatSetupEta=${session.seatSetupInfo?.seatSetupEta}ms\n"
+        )
+        append("Session: state=${session.state}, status=${session.status}\n")
         append("Create:\n")
         append("  URL: POST $createUrl\n")
         append("  Response:\n")
         append(createBody).append('\n')
         append("Claim:\n")
         if (claim == null) {
-            append("  attempted: no (no server host appeared in create/poll responses)\n")
+            append("  attempted: no (session never became ready with a server host)\n")
         } else {
             val accepted = claim.httpCode?.let { it in 200..299 } ?: false
             val http = claim.httpCode?.toString() ?: "error: ${claim.error ?: "unknown"}"
-            append("  attempted: yes, host: ${claim.host}, HTTP: $http, accepted: $accepted\n")
+            append("  attempts: $claimAttempts, accepted: $accepted\n")
+            append("  last host: ${claim.host}, HTTP: $http\n")
             append("  URL: PUT ${claim.url}\n")
         }
         append("Polls:\n")
@@ -548,7 +662,9 @@ class GfnSessionClient(
         appId: Int = 107879576, // NTE, from browser capture
         width: Int = 1280,
         height: Int = 720,
-        fps: Int = 60
+        fps: Int = 60,
+        // Called on the polling thread with the current queue/claim status text.
+        onProgress: (String) -> Unit = {}
     ): Result<SignalingServerInfo> = withContext(Dispatchers.IO) {
         // NanaPlay GfnApi.kt createSession: a fresh random nv-client-id per
         // invocation, shared by create + claim + poll within this Connect flow.
@@ -599,39 +715,34 @@ class GfnSessionClient(
             // Kept for the polling diagnostic banner (body is reassigned by polls).
             val createResponseBody = body
 
-            // Claim as soon as the assigned server ip is known. Creation alone leaves
-            // the session unclaimed and the signaling handshake answers 503.
-            var claimed = false
-            var claimOutcome: ClaimOutcome? = null
-            fun tryClaim() {
-                if (claimed) return
-                val host = session.claimHost() ?: return
-                claimOutcome = claimSession(host, session.sessionId, authToken, clientId, appId, width, height, fps)
-                claimed = true
-            }
-            tryClaim()
-            if (!claimed) {
-                Log.w(TAG, "No server ip in the create response yet; deferring claim until a poll returns one")
-            }
-
-            // Poll until both readiness conditions hold (NanaPlay semantics): the
-            // signaling entry (usage 14) has an ip, and the numeric status is 2/3.
             Log.i(
                 TAG,
                 "Initial session (${session.sessionId}): state=${session.state}, " +
-                    "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
+                    "status=${session.status}, queuePosition=${session.effectiveQueuePosition()}, " +
+                    "signalingIp=${session.signalingEntry()?.ip}"
             )
+            onProgress(session.progressText())
+
+            // Claim only once genuinely ready (NanaPlay claimSession semantics):
+            // status 2/3 AND a usage=14 signaling ip. Claiming straight after create
+            // while status=1 (queued) is rejected with HTTP 400.
+            var claimAccepted = false
+            var claimed = false
+            var claimOutcome: ClaimOutcome? = null
+            var claimAttempts = 0
+
             var retries = 0
             val pollLines = mutableListOf<String>()
             var lastPollUrl = ""
             var lastPollBody = ""
-            while (!session.isReady() && retries < MAX_POLL_ATTEMPTS) {
+            var terminalStatus: Int? = null
+            while (retries < MAX_POLL_ATTEMPTS) {
                 delay(POLL_INTERVAL_MS)
                 retries++
 
                 // NanaPlay poll parity: as soon as a server host is known (from the
                 // create response or any poll), poll https://<host> directly instead
-                // of the cloudmatchbeta zone base. Claim above is unchanged.
+                // of the cloudmatchbeta zone base.
                 val pollUrl = "${pollBase(session.claimHost())}/v2/session/${session.sessionId}"
                 lastPollUrl = pollUrl
                 val pollReq = cloudmatchRequest(pollUrl, authToken, clientId)
@@ -644,32 +755,116 @@ class GfnSessionClient(
                 if (!response.isSuccessful) {
                     pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, status=n/a, connectionInfo=no, url=$pollUrl"
                     Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
+                    onProgress("Session poll failed (HTTP ${response.code}); retrying...")
                     continue
                 }
 
                 sessionResp = json.decodeFromString<SessionResponse>(body)
-                session = sessionResp.session ?: session
+                // Merge: queued responses omit connectionInfo/sessionControlInfo, so a
+                // replace would erase a server host learned from an earlier response.
+                session = session.mergedWith(sessionResp.session ?: session)
                 val connectionSummary = session.connectionInfo?.let { "yes(${it.size})" } ?: "no"
                 pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, " +
-                    "status=${session.status}, connectionInfo=$connectionSummary, url=$pollUrl"
-                tryClaim()
+                    "status=${session.status}, queue=${session.effectiveQueuePosition()}, " +
+                    "connectionInfo=$connectionSummary, url=$pollUrl"
                 Log.i(
                     TAG,
                     "Poll $retries/$MAX_POLL_ATTEMPTS: state=${session.state}, " +
-                        "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}, " +
-                        "ready=${session.isReady()}"
+                    "status=${session.status}, queuePosition=${session.effectiveQueuePosition()}, " +
+                        "seatSetupStep=${session.seatSetupInfo?.seatSetupStep}, " +
+                        "signalingIp=${session.signalingEntry()?.ip}, ready=${session.isReady()}, " +
+                        "claimed=$claimed"
                 )
+
+                if (session.isTerminal()) {
+                    terminalStatus = session.status
+                    pollLines += "Terminal status=${session.status}; polling stopped"
+                    onProgress("Session ended (status=${session.status})")
+                    break
+                }
+
+                if (!session.isReady()) {
+                    // Back in the queue/not-ready state: an earlier claim acceptance is
+                    // no longer sufficient, so retry the claim once ready again.
+                    claimAccepted = false
+                    onProgress(session.progressText())
+                } else if (claimAccepted) {
+                    // The claim PUT succeeded and the session is still ready on the
+                    // next poll: claim confirmed, signaling may connect.
+                    claimed = true
+                    onProgress("Session claimed. Connecting signaling...")
+                    break
+                } else {
+                    val host = session.claimHost()
+                    if (host == null) {
+                        pollLines += "Claim skipped: ready but no usable server host"
+                        onProgress("Session ready but no server host yet; retrying...")
+                    } else {
+                        claimAttempts++
+                        val outcome = claimSession(
+                            host,
+                            session.sessionId,
+                            authToken,
+                            clientId,
+                            appId,
+                            width,
+                            height,
+                            fps
+                        )
+                        claimOutcome = outcome
+                        val accepted = outcome.httpCode?.let { it in 200..299 } ?: false
+                        val http = outcome.httpCode?.toString() ?: (outcome.error ?: "error")
+                        pollLines += "Claim #$claimAttempts: HTTP $http, accepted=$accepted, " +
+                            "host=$host, url=${outcome.url}"
+                        if (accepted) {
+                            claimAccepted = true
+                            onProgress("Claim accepted (HTTP ${outcome.httpCode}); verifying session...")
+                        } else {
+                            // Not ready or rejected: keep polling and retry on the next
+                            // ready poll instead of aborting the whole flow.
+                            onProgress("Claim failed ($http); continuing polling...")
+                        }
+                    }
+                }
             }
+
             if (session.isReady()) {
                 CrashDiagnostics.setStage("POLL_READY status=${session.status}")
+            }
+            if (claimed) {
+                CrashDiagnostics.setStage("CLAIMED sessionId=${session.sessionId}")
             }
             Log.i(
                 TAG,
                 "Polling ended after $retries attempt(s): state=${session.state}, " +
-                    "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
+                    "status=${session.status}, queuePosition=${session.effectiveQueuePosition()}, " +
+                    "signalingIp=${session.signalingEntry()?.ip}, claimed=$claimed, " +
+                    "terminalStatus=$terminalStatus"
             )
-            if (!claimed) {
-                Log.w(TAG, "Session was never claimed: the server ip never appeared in the response")
+
+            // A queued session is never an error. The final failure is only a
+            // terminal allocation or an exhausted polling budget (v26 diagnostic).
+            if (terminalStatus != null || !session.isReady() || !claimed) {
+                val stopReason = if (terminalStatus != null) {
+                    "terminal status=$terminalStatus"
+                } else {
+                    "polling limit reached after $retries attempt(s)"
+                }
+                return@withContext Result.failure(
+                    Exception(
+                        buildNoConnectionInfoReport(
+                            session = session,
+                            createUrl = endpoint,
+                            createBody = createResponseBody,
+                            claim = claimOutcome,
+                            claimAttempts = claimAttempts,
+                            pollLines = pollLines,
+                            lastPollUrl = lastPollUrl,
+                            lastPollBody = lastPollBody,
+                            stopReason = stopReason
+                        )
+                    )
+                )
             }
 
             // Raw connectionInfo (including fields we don't model) so classic-routing
@@ -687,9 +882,11 @@ class GfnSessionClient(
                             createUrl = endpoint,
                             createBody = createResponseBody,
                             claim = claimOutcome,
+                            claimAttempts = claimAttempts,
                             pollLines = pollLines,
                             lastPollUrl = lastPollUrl,
-                            lastPollBody = lastPollBody
+                            lastPollBody = lastPollBody,
+                            stopReason = "ready but connectionInfo is missing after merge"
                         )
                     )
                 )
