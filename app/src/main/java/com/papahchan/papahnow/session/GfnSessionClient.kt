@@ -279,6 +279,9 @@ class GfnSessionClient(
                     put("value", "2")
                 })
             })
+            // Parity with NanaPlay monitorSettings() (GfnApi.kt): every monitor
+            // entry carries displayData + hdr10PlusGamingData (explicit JsonNull
+            // for SDR, exactly as NanaPlay sends) and dpi 100, not 0.
             put("clientRequestMonitorSettings", buildJsonArray {
                 add(buildJsonObject {
                     put("monitorId", 0)
@@ -286,9 +289,11 @@ class GfnSessionClient(
                     put("positionY", 0)
                     put("widthInPixels", width)
                     put("heightInPixels", height)
-                    put("dpi", 0)
                     put("framesPerSecond", fps)
                     put("sdrHdrMode", 0)
+                    put("displayData", JsonNull)
+                    put("hdr10PlusGamingData", JsonNull)
+                    put("dpi", 100)
                 })
             })
             // NanaPlay default GAMEPAD_FRIENDLY (GfnAppLaunchMode): the host
