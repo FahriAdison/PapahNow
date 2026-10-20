@@ -31,6 +31,9 @@ data class SessionResponse(
 data class SessionData(
     @SerialName("sessionId") val sessionId: String,
     @SerialName("state") val state: String? = null,
+    // Numeric session status. 2/3 mean ready (NanaPlay READY_SESSION_STATUSES); the
+    // string `state` is unreliable for this.
+    @SerialName("status") val status: Int? = null,
     @SerialName("connectionInfo") val connectionInfo: List<ConnectionInfoItem>? = null
 )
 
@@ -65,6 +68,13 @@ class GfnSessionClient(
     companion object {
         private const val TAG = "GfnSessionClient"
         private const val SIGNALING_USAGE_TYPE = 14
+
+        // NanaPlay GfnApi READY_SESSION_STATUSES: session is ready when its numeric
+        // status is 2 or 3.
+        private val READY_SESSION_STATUSES = setOf(2, 3)
+        // Queues can take minutes: poll every 2s, up to 60 times (~2 minutes).
+        private const val MAX_POLL_ATTEMPTS = 60
+        private const val POLL_INTERVAL_MS = 2000L
 
         // Asia-Pacific regional host (ap-india), from browser capture. Use
         // "https://prod.cloudmatchbeta.nvidiagrid.net" for global routing.
@@ -147,6 +157,17 @@ class GfnSessionClient(
      */
     private fun currentTimezoneOffsetMs(): Int =
         TimeZone.getDefault().getOffset(System.currentTimeMillis())
+
+    /** Signaling connection entry (usage 14), once the server has published it. */
+    private fun SessionData.signalingEntry(): ConnectionInfoItem? =
+        connectionInfo?.find { it.usage == SIGNALING_USAGE_TYPE }
+
+    /**
+     * Ready per NanaPlay: the signaling entry has an ip AND the numeric status is 2/3.
+     * The `state` string is not used for readiness.
+     */
+    private fun SessionData.isReady(): Boolean =
+        signalingEntry()?.ip != null && status != null && status in READY_SESSION_STATUSES
 
     /**
      * Requests a game streaming session from Cloudmatch API.
@@ -281,12 +302,17 @@ class GfnSessionClient(
             var sessionResp = json.decodeFromString<SessionResponse>(body)
             var session = sessionResp.session ?: return@withContext Result.failure(Exception("No session object in response: $body"))
 
-            // If session is queued or not ready yet, poll for a short period
+            // Poll until both readiness conditions hold (NanaPlay semantics): the
+            // signaling entry (usage 14) has an ip, and the numeric status is 2/3.
+            Log.i(
+                TAG,
+                "Initial session (${session.sessionId}): state=${session.state}, " +
+                    "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
+            )
             var retries = 0
-            while (session.state != "ready_for_connection" && session.connectionInfo.isNullOrEmpty() && retries < 15) {
-                delay(2000)
+            while (!session.isReady() && retries < MAX_POLL_ATTEMPTS) {
+                delay(POLL_INTERVAL_MS)
                 retries++
-                Log.i(TAG, "Polling session status (${session.sessionId}), state=${session.state}, attempt $retries...")
 
                 // Polling uses the same identity headers; path without query params.
                 val pollReq = cloudmatchRequest("$baseEndpoint/${session.sessionId}", authToken)
@@ -295,11 +321,25 @@ class GfnSessionClient(
 
                 response = httpClient.newCall(pollReq).execute()
                 body = response.body?.string() ?: ""
-                if (response.isSuccessful) {
-                    sessionResp = json.decodeFromString<SessionResponse>(body)
-                    session = sessionResp.session ?: session
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
+                    continue
                 }
+
+                sessionResp = json.decodeFromString<SessionResponse>(body)
+                session = sessionResp.session ?: session
+                Log.i(
+                    TAG,
+                    "Poll $retries/$MAX_POLL_ATTEMPTS: state=${session.state}, " +
+                        "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}, " +
+                        "ready=${session.isReady()}"
+                )
             }
+            Log.i(
+                TAG,
+                "Polling ended after $retries attempt(s): state=${session.state}, " +
+                    "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
+            )
 
             // Raw connectionInfo (including fields we don't model) so classic-routing
             // responses can be inspected directly in Logcat.
