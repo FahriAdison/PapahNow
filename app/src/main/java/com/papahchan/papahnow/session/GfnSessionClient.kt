@@ -221,7 +221,10 @@ class GfnSessionClient(
     ): JsonObject {
         val subSessionId = UUID.randomUUID().toString()
         val data = buildJsonObject {
-            put("appId", appId)
+            // AppId as a JSON string like NanaPlay's create body (appId is a
+            // decimal string there). Sync builds create and claim from this shared
+            // builder, so the claim copy also carries the string parity.
+            put("appId", appId.toString())
             put("internalTitle", JsonNull)
             put("audioMode", 2)
             put("remoteControllersBitmap", 0)
