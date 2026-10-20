@@ -102,7 +102,9 @@ class GfnSessionClient(
 
         // Body identity, matching the proven NanaPlay client. clientVersion stays "30.0"
         // (Cloudmatch client identity); the Android app version goes in nv-client-version.
-        private const val CLIENT_ID = "ec7e38d4-03af-4b58-b131-cfb0495903ab"
+        // nv-client-id is NOT a constant: NanaPlay's createSession uses a fresh
+        // UUID.randomUUID() per invocation (GfnApi.kt), so the same is generated
+        // per Connect flow and shared by create + claim + poll.
         // NanaPlay (proven streaming right now) sends NVIDIA-CLASSIC on every
         // CloudMatch request, including its WebRTC sessions: the transport is
         // selected by the body metadata (GSStreamerType=WebRTC, wssignaling=1),
@@ -146,7 +148,12 @@ class GfnSessionClient(
      * Builds every Cloudmatch request with the same client identity headers.
      * Always go through this helper so create-session and polling never diverge.
      */
-    private fun cloudmatchRequest(url: String, authToken: String): Request.Builder =
+    private fun cloudmatchRequest(
+        url: String,
+        authToken: String,
+        // nv-client-id: fresh UUID per Connect flow (create + claim + poll share it).
+        clientId: String
+    ): Request.Builder =
         Request.Builder()
             .url(url)
             .addHeader("Authorization", "$AUTH_SCHEME $authToken")
@@ -155,7 +162,7 @@ class GfnSessionClient(
             .addHeader("Referer", REFERER)
             .addHeader("Content-Type", "application/json")
             .addHeader("x-device-id", deviceHashId)
-            .addHeader("nv-client-id", CLIENT_ID)
+            .addHeader("nv-client-id", clientId)
             .addHeader("nv-client-streamer", CLIENT_STREAMER)
             .addHeader("nv-client-version", NV_CLIENT_VERSION)
             .addHeader("nv-client-type", CLIENT_TYPE)
@@ -369,6 +376,7 @@ class GfnSessionClient(
         host: String,
         sessionId: String,
         authToken: String,
+        clientId: String,
         appId: Int,
         width: Int,
         height: Int,
@@ -387,7 +395,7 @@ class GfnSessionClient(
         Log.d(TAG, "Request body: $payload")
 
         try {
-            val request = cloudmatchRequest(url, authToken)
+            val request = cloudmatchRequest(url, authToken, clientId)
                 .put(payload.toRequestBody("application/json".toMediaType()))
                 .build()
             Log.d(TAG, maskedHeaders(request))
@@ -419,6 +427,11 @@ class GfnSessionClient(
         height: Int = 720,
         fps: Int = 60
     ): Result<SignalingServerInfo> = withContext(Dispatchers.IO) {
+        // NanaPlay GfnApi.kt createSession: a fresh random nv-client-id per
+        // invocation, shared by create + claim + poll within this Connect flow.
+        // The old constant id was in place for a full day and matches the
+        // spontaneous ~11:03 regression (suspected server-side dedup/throttle).
+        val clientId = UUID.randomUUID().toString()
         val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
         // Query params required by the session endpoint, per browser capture.
         val endpoint = "$baseEndpoint?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
@@ -428,7 +441,7 @@ class GfnSessionClient(
 
         Log.i(TAG, "Requesting session from $endpoint...")
         val requestBody = payload.toRequestBody("application/json".toMediaType())
-        val request = cloudmatchRequest(endpoint, authToken)
+        val request = cloudmatchRequest(endpoint, authToken, clientId)
             .post(requestBody)
             .build()
 
@@ -467,7 +480,7 @@ class GfnSessionClient(
             fun tryClaim() {
                 if (claimed) return
                 val host = session.claimHost() ?: return
-                claimSession(host, session.sessionId, authToken, appId, width, height, fps)
+                claimSession(host, session.sessionId, authToken, clientId, appId, width, height, fps)
                 claimed = true
             }
             tryClaim()
@@ -488,7 +501,7 @@ class GfnSessionClient(
                 retries++
 
                 // Polling uses the same identity headers; path without query params.
-                val pollReq = cloudmatchRequest("$baseEndpoint/${session.sessionId}", authToken)
+                val pollReq = cloudmatchRequest("$baseEndpoint/${session.sessionId}", authToken, clientId)
                     .get()
                     .build()
 
