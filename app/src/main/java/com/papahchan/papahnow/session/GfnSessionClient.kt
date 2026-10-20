@@ -89,9 +89,12 @@ class GfnSessionClient(
         private const val MAX_POLL_ATTEMPTS = 60
         private const val POLL_INTERVAL_MS = 2000L
 
-        // Asia-Pacific regional host (ap-india), from browser capture. Use
-        // "https://prod.cloudmatchbeta.nvidiagrid.net" for global routing.
-        private const val DEFAULT_CLOUDMATCH_URL = "https://ap-india.cloudmatchbeta.nvidiagrid.net"
+        // BINARY HOST TEST: prod (NanaPlay's default host, GfnApi.kt
+        // DEFAULT_STREAMING_SERVICE_URL) instead of the earlier ap-india
+        // regional host ("https://ap-india.cloudmatchbeta.nvidiagrid.net")
+        // that kept answering HTTP 500 8A910003 on create. If prod also 500s,
+        // the transport/allocator mismatch explanation can be ruled out here.
+        private const val DEFAULT_CLOUDMATCH_URL = "https://prod.cloudmatchbeta.nvidiagrid.net"
 
         // Query parameters required by the session request endpoint.
         private const val KEYBOARD_LAYOUT = "en_US"
