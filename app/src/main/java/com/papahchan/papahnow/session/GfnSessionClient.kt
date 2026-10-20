@@ -222,11 +222,15 @@ class GfnSessionClient(
         connectionInfo?.find { it.usage == SIGNALING_USAGE_TYPE }
 
     /**
-     * Ready per NanaPlay: the signaling entry has an ip AND the numeric status is 2/3.
-     * The `state` string is not used for readiness.
+     * Ready for claim per NanaPlay ActiveSessionInfo.isReadyForClaim(): numeric
+     * status 2/3 AND a non-empty server host. The host comes from claimHost()'s
+     * fallback chain (usage=14 ip -> resourcePath host -> sessionControlInfo.ip);
+     * a missing usage=14 ip alone must NOT block the claim, because the zone base
+     * often publishes only sessionControlInfo/resourcePath until the claim resumes
+     * the session. The `state` string is not used for readiness.
      */
     private fun SessionData.isReady(): Boolean =
-        signalingEntry()?.ip != null && status != null && status in READY_SESSION_STATUSES
+        status != null && status in READY_SESSION_STATUSES && claimHost() != null
 
     /**
      * sessionRequestData shared by session creation and claim. NanaPlay's claim body
