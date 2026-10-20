@@ -911,7 +911,10 @@ class GfnSessionClient(
             val host = usableSessionHost(signalingInfo.ip)
                 ?: session.claimHost()
                 ?: return@withContext Result.failure(Exception("No usable signaling host in connectionInfo: $connectionList"))
-            val secure = signalingInfo.appLevelProtocol == 5 // 5 = wss
+            // GFN signaling is always WSS regardless of appLevelProtocol (usage=14
+            // entries carry 6, not 5): NanaPlay hardcodes wss:// and the HTTPS web
+            // client cannot open ws://. Do not relax the network security policy.
+            val secure = true
             Log.i(TAG, "Signaling server found: host=$host, port=${signalingInfo.port ?: 0}, secure=$secure, resourcePath=${signalingInfo.resourcePath}")
 
             Result.success(
