@@ -161,6 +161,13 @@ class GfnSessionClient(
         return "$scheme ${token.take(8)}...<censored, ${token.length} chars>"
     }
 
+    /** Formats request headers one per line, with the JWT censored. */
+    private fun maskedHeaders(request: Request): String =
+        request.headers.joinToString("\n") { (name, value) ->
+            val logged = if (name.equals("Authorization", ignoreCase = true)) maskAuthorization(value) else value
+            "  $name: $logged"
+        }
+
     /**
      * GFN expects the timezone offset in milliseconds (positive east of UTC), e.g.
      * +25200000 for UTC+7. Computed per request so timezone changes are picked up.
@@ -370,10 +377,7 @@ class GfnSessionClient(
             val request = cloudmatchRequest(url, authToken)
                 .put(payload.toRequestBody("application/json".toMediaType()))
                 .build()
-            request.headers.forEach { (name, value) ->
-                val logged = if (name.equals("Authorization", ignoreCase = true)) maskAuthorization(value) else value
-                Log.d(TAG, "  $name: $logged")
-            }
+            Log.d(TAG, maskedHeaders(request))
             httpClient.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (response.isSuccessful) {
@@ -416,10 +420,7 @@ class GfnSessionClient(
 
         // Full request dump for diffing against browser captures. The JWT is censored.
         Log.d(TAG, "POST $endpoint")
-        request.headers.forEach { (name, value) ->
-            val logged = if (name.equals("Authorization", ignoreCase = true)) maskAuthorization(value) else value
-            Log.d(TAG, "  $name: $logged")
-        }
+        Log.d(TAG, maskedHeaders(request))
         Log.d(TAG, "Request body: $payload")
 
         try {
@@ -427,8 +428,20 @@ class GfnSessionClient(
             var body = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
-                Log.e(TAG, "Session creation failed: HTTP ${response.code}: $body")
-                return@withContext Result.failure(Exception("HTTP ${response.code}: $body"))
+                // Surface the exact outgoing request in the UI, not just Logcat, so the
+                // 500 can be diffed against NanaPlay/browser captures without a cable.
+                val detail = buildString {
+                    append("Session creation failed: HTTP ${response.code}\n")
+                    append("URL: POST $endpoint\n")
+                    append("Headers:\n")
+                    append(maskedHeaders(request)).append('\n')
+                    append("Request body:\n")
+                    append(payload).append('\n')
+                    append("Response:\n")
+                    append(body)
+                }
+                Log.e(TAG, detail)
+                return@withContext Result.failure(Exception(detail))
             }
 
             var sessionResp = json.decodeFromString<SessionResponse>(body)
