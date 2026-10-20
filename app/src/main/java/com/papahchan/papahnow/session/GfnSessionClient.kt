@@ -424,6 +424,14 @@ class GfnSessionClient(
         return chosen
     }
 
+    /** Result of the claim attempt, retained for the polling diagnostic banner. */
+    private data class ClaimOutcome(
+        val host: String,
+        val url: String,
+        val httpCode: Int?,
+        val error: String? = null
+    )
+
     /**
      * Claims the created session before polling. The signaling endpoint rejects the
      * WebSocket handshake (503) until the session is claimed.
@@ -437,7 +445,7 @@ class GfnSessionClient(
         width: Int,
         height: Int,
         fps: Int
-    ) {
+    ): ClaimOutcome {
         val url = "https://$host/v2/session/$sessionId?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
         val payload = buildJsonObject {
             put("action", 2)
@@ -450,7 +458,7 @@ class GfnSessionClient(
         Log.d(TAG, "PUT $url")
         Log.d(TAG, "Request body: $payload")
 
-        try {
+        return try {
             val request = cloudmatchRequest(url, authToken, clientId)
                 .put(payload.toRequestBody("application/json".toMediaType()))
                 .build()
@@ -464,10 +472,69 @@ class GfnSessionClient(
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
                 }
                 Log.d(TAG, "Claim response body: $responseBody")
+                ClaimOutcome(host = host, url = url, httpCode = response.code)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
+            ClaimOutcome(host = host, url = url, httpCode = null, error = e.localizedMessage)
         }
+    }
+
+    /** Mirrors NanaPlay isZoneHostname(): routing hosts are never polled directly. */
+    private fun isZoneHostname(value: String): Boolean =
+        value.contains("cloudmatchbeta.nvidiagrid.net") || value.contains("cloudmatch.nvidiagrid.net")
+
+    /**
+     * Mirrors NanaPlay resolvePollStopBase(): while the configured base is a
+     * cloudmatchbeta zone, switch polling to https://<assigned server host> as soon
+     * as one is known; otherwise keep polling the original base.
+     */
+    private fun pollBase(serverHost: String?): String {
+        val host = serverHost?.takeIf { it.isNotBlank() } ?: return cloudmatchUrl.trimEnd('/')
+        return if (cloudmatchUrl.contains("cloudmatchbeta.nvidiagrid.net") && !isZoneHostname(host)) {
+            "https://$host"
+        } else {
+            cloudmatchUrl.trimEnd('/')
+        }
+    }
+
+    /**
+     * Polling diagnostic in the same labeled style as the create-failure banner:
+     * create response, claim status, per-poll summary and last poll body.
+     */
+    private fun buildNoConnectionInfoReport(
+        session: SessionData,
+        createUrl: String,
+        createBody: String,
+        claim: ClaimOutcome?,
+        pollLines: List<String>,
+        lastPollUrl: String,
+        lastPollBody: String
+    ): String = buildString {
+        append("Session created but no connectionInfo received (state=${session.state}, status=${session.status})\n")
+        append("Create:\n")
+        append("  URL: POST $createUrl\n")
+        append("  Response:\n")
+        append(createBody).append('\n')
+        append("Claim:\n")
+        if (claim == null) {
+            append("  attempted: no (no server host appeared in create/poll responses)\n")
+        } else {
+            val accepted = claim.httpCode?.let { it in 200..299 } ?: false
+            val http = claim.httpCode?.toString() ?: "error: ${claim.error ?: "unknown"}"
+            append("  attempted: yes, host: ${claim.host}, HTTP: $http, accepted: $accepted\n")
+            append("  URL: PUT ${claim.url}\n")
+        }
+        append("Polls:\n")
+        if (pollLines.isEmpty()) {
+            append("  (no poll responses)\n")
+        } else {
+            pollLines.forEach { append("  ").append(it).append('\n') }
+        }
+        append("Last poll:\n")
+        append("  URL: GET ${lastPollUrl.ifBlank { "n/a" }}\n")
+        append("  Response:\n")
+        append(lastPollBody.take(3000))
     }
 
     /**
@@ -529,14 +596,17 @@ class GfnSessionClient(
 
             var sessionResp = json.decodeFromString<SessionResponse>(body)
             var session = sessionResp.session ?: return@withContext Result.failure(Exception("No session object in response: $body"))
+            // Kept for the polling diagnostic banner (body is reassigned by polls).
+            val createResponseBody = body
 
             // Claim as soon as the assigned server ip is known. Creation alone leaves
             // the session unclaimed and the signaling handshake answers 503.
             var claimed = false
+            var claimOutcome: ClaimOutcome? = null
             fun tryClaim() {
                 if (claimed) return
                 val host = session.claimHost() ?: return
-                claimSession(host, session.sessionId, authToken, clientId, appId, width, height, fps)
+                claimOutcome = claimSession(host, session.sessionId, authToken, clientId, appId, width, height, fps)
                 claimed = true
             }
             tryClaim()
@@ -552,24 +622,36 @@ class GfnSessionClient(
                     "status=${session.status}, signalingIp=${session.signalingEntry()?.ip}"
             )
             var retries = 0
+            val pollLines = mutableListOf<String>()
+            var lastPollUrl = ""
+            var lastPollBody = ""
             while (!session.isReady() && retries < MAX_POLL_ATTEMPTS) {
                 delay(POLL_INTERVAL_MS)
                 retries++
 
-                // Polling uses the same identity headers; path without query params.
-                val pollReq = cloudmatchRequest("$baseEndpoint/${session.sessionId}", authToken, clientId)
+                // NanaPlay poll parity: as soon as a server host is known (from the
+                // create response or any poll), poll https://<host> directly instead
+                // of the cloudmatchbeta zone base. Claim above is unchanged.
+                val pollUrl = "${pollBase(session.claimHost())}/v2/session/${session.sessionId}"
+                lastPollUrl = pollUrl
+                val pollReq = cloudmatchRequest(pollUrl, authToken, clientId)
                     .get()
                     .build()
 
                 response = httpClient.newCall(pollReq).execute()
                 body = response.body?.string() ?: ""
+                lastPollBody = body
                 if (!response.isSuccessful) {
+                    pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, status=n/a, connectionInfo=no, url=$pollUrl"
                     Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
                     continue
                 }
 
                 sessionResp = json.decodeFromString<SessionResponse>(body)
                 session = sessionResp.session ?: session
+                val connectionSummary = session.connectionInfo?.let { "yes(${it.size})" } ?: "no"
+                pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, " +
+                    "status=${session.status}, connectionInfo=$connectionSummary, url=$pollUrl"
                 tryClaim()
                 Log.i(
                     TAG,
@@ -598,7 +680,19 @@ class GfnSessionClient(
             Log.i(TAG, "Raw connectionInfo: $rawConnectionInfo")
 
             val connectionList = session.connectionInfo
-                ?: return@withContext Result.failure(Exception("Session created but no connectionInfo received. State: ${session.state}"))
+                ?: return@withContext Result.failure(
+                    Exception(
+                        buildNoConnectionInfoReport(
+                            session = session,
+                            createUrl = endpoint,
+                            createBody = createResponseBody,
+                            claim = claimOutcome,
+                            pollLines = pollLines,
+                            lastPollUrl = lastPollUrl,
+                            lastPollBody = lastPollBody
+                        )
+                    )
+                )
 
             Log.i(TAG, "connectionInfo: $connectionList")
 
