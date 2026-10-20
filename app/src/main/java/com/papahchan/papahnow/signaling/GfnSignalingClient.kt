@@ -45,10 +45,9 @@ class GfnSignalingClient(
 
     fun connect() {
         val scheme = if (secure) "wss" else "ws"
-        val basePath = if (!resourcePath.isNullOrEmpty()) {
-            val trimmed = resourcePath.trim('/')
-            if (trimmed.isNotEmpty()) "/$trimmed" else ""
-        } else ""
+        // WebRTC signaling lives under /nvst; connecting at the root returns HTTP 503.
+        // (resourcePath belongs to classic RTSP sessions and is intentionally ignored.)
+        val basePath = "/nvst"
 
         val urlBuilder = StringBuilder("$scheme://$host:$port$basePath/sign_in?peer_id=$peerName&version=3.0&peer_role=1")
         if (!sessionId.isNullOrEmpty()) {
