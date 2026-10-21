@@ -57,8 +57,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.webrtc.PeerConnection
+import org.webrtc.RendererCommon
 import org.webrtc.VideoTrack
 import java.util.UUID
 
@@ -80,6 +82,11 @@ class MainActivity : ComponentActivity() {
         private const val APP_PREFS = "papahnow_prefs"
         private const val CLOUDMATCH_ZONE_KEY = "cloudmatch_zone"
         private const val DEFAULT_CLOUDMATCH_ZONE = "prod"
+
+        // Connection watchdogs: never leave the UI stuck in a connecting state.
+        private const val SIGNALING_OFFER_TIMEOUT_MS = 15_000L
+        private const val NEGOTIATION_TIMEOUT_MS = 20_000L
+        private const val VIDEO_AFTER_ICE_TIMEOUT_MS = 10_000L
     }
 
     private val authManager = GfnAuthManager()
@@ -113,6 +120,9 @@ class MainActivity : ComponentActivity() {
     // Owned by the Activity lifecycle: cancelled on Disconnect/onDestroy so a
     // queued session cannot keep polling and claiming in the background.
     private var connectionJob: Job? = null
+    // Fires when signaling/ICE stalls; cancelled as soon as the next expected
+    // milestone (offer, ICE connected, first video frame) arrives.
+    private var watchdogJob: Job? = null
     // Short-lived, process-independent teardown (Cloudmatch stop) that must be
     // allowed to finish even when the Activity is destroyed.
     private val sessionTeardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -131,6 +141,21 @@ class MainActivity : ComponentActivity() {
     private var authCodeInput by mutableStateOf("")
     private var cloudmatchZone by mutableStateOf(DEFAULT_CLOUDMATCH_ZONE)
     private var showDebugPanel by mutableStateOf(false)
+
+    /**
+     * First decoded frame is the only reliable "video is actually flowing"
+     * signal: a remote track exists as soon as the offer is applied, long
+     * before ICE/DTLS completes.
+     */
+    private val rendererEvents = object : RendererCommon.RendererEvents {
+        override fun onFirstFrameRendered() {
+            runOnUiThread { onFirstVideoFrameRendered() }
+        }
+
+        override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
+            Log.i(TAG, "Video frame resolution: ${videoWidth}x$videoHeight rotation=$rotation")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -155,7 +180,7 @@ class MainActivity : ComponentActivity() {
         peerConnectionWrapper = GfnPeerConnection(this, peerConnectionListener)
         streamRenderer = StreamRenderer(this).apply {
             peerConnectionWrapper?.let { pc ->
-                initRenderer(pc.eglBase.eglBaseContext)
+                initRenderer(pc.eglBase.eglBaseContext, rendererEvents)
             }
         }
 
@@ -370,8 +395,13 @@ class MainActivity : ComponentActivity() {
             )
 
             // Ensure PeerConnection is ready
-            peerConnectionWrapper?.createPeerConnection(serverInfo.iceServers)
+            val wrapper = peerConnectionWrapper
+                ?: throw IllegalStateException("PeerConnection wrapper is unavailable")
+            if (!wrapper.createPeerConnection(serverInfo.iceServers)) {
+                throw IllegalStateException("PeerConnection creation failed")
+            }
             CrashDiagnostics.setStage("PEER_CONNECTION_CREATED")
+            cancelWatchdog()
 
             signalingClient?.disconnect()
             signalingClient = GfnSignalingClient(
@@ -390,8 +420,11 @@ class MainActivity : ComponentActivity() {
                 .takeIf { it.isNotBlank() }
                 ?.let { "\n$it" }
                 .orEmpty()
-            errorMessage = "Signaling setup failed: ${e.localizedMessage}$claimDetails"
-            connectionState = ConnectionState.DISCONNECTED
+            teardownConnection(
+                statusText = "Disconnected",
+                errorText = "Signaling setup failed: ${e.localizedMessage}$claimDetails",
+                recreate = true
+            )
         }
     }
 
@@ -413,14 +446,30 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 CrashDiagnostics.setStage("SIGNALING_CONNECTED")
                 statusDetail = "Signaling connected. Awaiting SDP offer..."
+                startWatchdog(
+                    SIGNALING_OFFER_TIMEOUT_MS,
+                    "No SDP offer received ${SIGNALING_OFFER_TIMEOUT_MS / 1000}s after signaling connected"
+                )
             }
         }
 
         override fun onOfferReceived(sdp: String, nvstSdp: String?, fromPeerId: Int) {
             runOnUiThread {
+                cancelWatchdog()
+                val wrapper = peerConnectionWrapper
+                if (wrapper == null) {
+                    failAndTeardown("SDP offer received but PeerConnection is unavailable")
+                    return@runOnUiThread
+                }
                 connectionState = ConnectionState.CONNECTING
                 statusDetail = "SDP offer received. Negotiating WebRTC..."
-                peerConnectionWrapper?.handleRemoteOffer(sdp, nvstSdp)
+                wrapper.handleRemoteOffer(sdp, nvstSdp)
+                // handleRemoteOffer may have failed synchronously (and torn down).
+                if (connectionState == ConnectionState.DISCONNECTED) return@runOnUiThread
+                startWatchdog(
+                    NEGOTIATION_TIMEOUT_MS,
+                    "WebRTC negotiation did not complete within ${NEGOTIATION_TIMEOUT_MS / 1000}s"
+                )
             }
         }
 
@@ -487,8 +536,11 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 Log.i(TAG, "Remote video track received! Attaching to renderer...")
                 streamRenderer?.attachVideoTrack(videoTrack)
-                connectionState = ConnectionState.STREAMING
-                statusDetail = "Video connected & streaming!"
+                // A track is announced with the SDP answer, before media flows.
+                // Keep CONNECTING until the renderer reports its first frame.
+                if (connectionState != ConnectionState.STREAMING) {
+                    statusDetail = "Video track received. Waiting for first frame..."
+                }
             }
         }
 
@@ -499,6 +551,11 @@ class MainActivity : ComponentActivity() {
                 if (state == PeerConnection.IceConnectionState.CONNECTED || state == PeerConnection.IceConnectionState.COMPLETED) {
                     if (connectionState != ConnectionState.STREAMING) {
                         connectionState = ConnectionState.CONNECTING
+                        startWatchdog(
+                            VIDEO_AFTER_ICE_TIMEOUT_MS,
+                            "ICE connected but no video frame within " +
+                                "${VIDEO_AFTER_ICE_TIMEOUT_MS / 1000}s"
+                        )
                     }
                 } else if (state == PeerConnection.IceConnectionState.FAILED) {
                     if (connectionState != ConnectionState.DISCONNECTED) {
@@ -513,7 +570,17 @@ class MainActivity : ComponentActivity() {
                 Log.i(TAG, "PeerConnection state changed: $state")
                 statusDetail = "PeerConnection: $state"
                 if (state == PeerConnection.PeerConnectionState.CONNECTED) {
-                    connectionState = ConnectionState.STREAMING
+                    // STREAMING is only declared when the renderer draws its
+                    // first frame; connected transport without frames must
+                    // still time out.
+                    if (connectionState != ConnectionState.STREAMING) {
+                        connectionState = ConnectionState.CONNECTING
+                        startWatchdog(
+                            VIDEO_AFTER_ICE_TIMEOUT_MS,
+                            "PeerConnection connected but no video frame within " +
+                                "${VIDEO_AFTER_ICE_TIMEOUT_MS / 1000}s"
+                        )
+                    }
                 } else if (state == PeerConnection.PeerConnectionState.FAILED) {
                     if (connectionState != ConnectionState.DISCONNECTED) {
                         failAndTeardown("WebRTC PeerConnection failed${iceDiagnostics()}")
@@ -529,6 +596,34 @@ class MainActivity : ComponentActivity() {
                 failAndTeardown(description + iceDiagnostics())
             }
         }
+    }
+
+    /** Called on the UI thread when the renderer draws its first real frame. */
+    private fun onFirstVideoFrameRendered() {
+        if (connectionState == ConnectionState.DISCONNECTED) return
+        cancelWatchdog()
+        Log.i(TAG, "First video frame rendered")
+        connectionState = ConnectionState.STREAMING
+        statusDetail = "Video connected & streaming!"
+    }
+
+    /** (Re)arms the single connection watchdog; only one can be pending. */
+    private fun startWatchdog(timeoutMs: Long, failureMessage: String) {
+        watchdogJob?.cancel()
+        watchdogJob = lifecycleScope.launch {
+            delay(timeoutMs)
+            if (connectionState != ConnectionState.DISCONNECTED &&
+                connectionState != ConnectionState.STREAMING
+            ) {
+                Log.e(TAG, "Connection watchdog expired: $failureMessage")
+                failAndTeardown(failureMessage + iceDiagnostics())
+            }
+        }
+    }
+
+    private fun cancelWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
     }
 
     private fun failAndTeardown(message: String) {
@@ -564,6 +659,7 @@ class MainActivity : ComponentActivity() {
         connectionState = ConnectionState.DISCONNECTED
         connectionJob?.cancel()
         connectionJob = null
+        cancelWatchdog()
 
         val client = signalingClient
         signalingClient = null
@@ -579,7 +675,7 @@ class MainActivity : ComponentActivity() {
         if (recreate) {
             val wrapper = GfnPeerConnection(this, peerConnectionListener)
             peerConnectionWrapper = wrapper
-            streamRenderer?.initRenderer(wrapper.eglBase.eglBaseContext)
+            streamRenderer?.initRenderer(wrapper.eglBase.eglBaseContext, rendererEvents)
         }
 
         connectionState = ConnectionState.DISCONNECTED

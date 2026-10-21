@@ -16,6 +16,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class GfnSignalingClient(
@@ -63,6 +64,10 @@ class GfnSignalingClient(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var heartbeatJob: Job? = null
     private val recentRx = ArrayDeque<String>()
+    // Exactly one terminal callback per connection: OkHttp can deliver both
+    // onClosing and onClosed, and a local disconnect must not report at all.
+    private val terminalNotified = AtomicBoolean(false)
+    private val manualDisconnect = AtomicBoolean(false)
     @Volatile
     private var lastAnswerSummary: String = ""
     private val ackSequence = AtomicInteger(1)
@@ -169,21 +174,32 @@ class GfnSignalingClient(
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "Signaling closing: code=$code, reason=$reason")
                 webSocket.close(1000, null)
-                listener.onSignalingClosed(code, reason)
+                notifyClosed(code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "Signaling closed: code=$code, reason=$reason")
-                stopHeartbeat()
-                listener.onSignalingClosed(code, reason)
+                notifyClosed(code, reason)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "Signaling WebSocket failure: ${t.message}, response code: ${response?.code}", t)
                 stopHeartbeat()
-                listener.onSignalingError(t)
+                if (manualDisconnect.get()) return
+                if (terminalNotified.compareAndSet(false, true)) {
+                    listener.onSignalingError(t)
+                }
             }
         })
+    }
+
+    /** Single idempotent terminal-close path for onClosing/onClosed. */
+    private fun notifyClosed(code: Int, reason: String) {
+        stopHeartbeat()
+        if (manualDisconnect.get()) return
+        if (terminalNotified.compareAndSet(false, true)) {
+            listener.onSignalingClosed(code, reason)
+        }
     }
 
     /**
@@ -284,6 +300,8 @@ class GfnSignalingClient(
 
     fun disconnect() {
         Log.i(TAG, "Disconnecting signaling client...")
+        // Suppress listener callbacks: the Activity is already tearing down.
+        manualDisconnect.set(true)
         stopHeartbeat()
         try {
             webSocket?.close(1000, "Normal closure")

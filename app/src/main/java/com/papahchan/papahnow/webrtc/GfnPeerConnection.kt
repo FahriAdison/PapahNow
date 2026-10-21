@@ -74,6 +74,20 @@ class GfnPeerConnection(
     @Volatile
     private var lastPeerConnectionState: PeerConnection.PeerConnectionState? = null
 
+    // Unified Plan drops candidates that arrive before setRemoteDescription has
+    // completed, so buffer them and flush once it succeeds. Local candidates are
+    // held until the answer has been handed to the signaling client, otherwise
+    // the server can receive candidates for an answer it has not seen yet.
+    private val iceLock = Any()
+    private val pendingRemoteIceCandidates = mutableListOf<IceCandidate>()
+    private val pendingLocalIceCandidates = mutableListOf<IceCandidate>()
+    private var remoteDescriptionSet = false
+    private var answerSent = false
+    @Volatile
+    private var remoteIceAddedCount = 0
+    @Volatile
+    private var remoteIceAddFailureCount = 0
+
     init {
         initializeFactory()
     }
@@ -98,7 +112,7 @@ class GfnPeerConnection(
         Log.i(TAG, "PeerConnectionFactory initialized with hardware decoder/encoder")
     }
 
-    fun createPeerConnection(iceServers: List<IceServerConfig> = emptyList()) {
+    fun createPeerConnection(iceServers: List<IceServerConfig> = emptyList()): Boolean {
         localIceCandidateCount = 0
         remoteIceCandidateCount = 0
         localHostCandidateCount = 0
@@ -110,6 +124,14 @@ class GfnPeerConnection(
         inputChannelV1 = null
         partialChannel = null
         statsChannel = null
+        synchronized(iceLock) {
+            pendingRemoteIceCandidates.clear()
+            pendingLocalIceCandidates.clear()
+            remoteDescriptionSet = false
+            answerSent = false
+        }
+        remoteIceAddedCount = 0
+        remoteIceAddFailureCount = 0
 
         // Always merge session ICE servers with the known-good STUN fallbacks and
         // deduplicate per URL. A TURN-only session config must not suppress STUN:
@@ -194,11 +216,27 @@ class GfnPeerConnection(
                         localRelayCandidateCount++
                 }
                 Log.i(TAG, "Local ICE candidate discovered: ${candidate.sdpMid}[${candidate.sdpMLineIndex}] => ${candidate.sdp}")
-                listener.onSendLocalIceCandidate(
-                    candidate.sdpMid ?: "",
-                    candidate.sdpMLineIndex,
-                    candidate.sdp
-                )
+                val sendNow = synchronized(iceLock) {
+                    if (answerSent) {
+                        true
+                    } else {
+                        pendingLocalIceCandidates.add(candidate)
+                        false
+                    }
+                }
+                if (sendNow) {
+                    listener.onSendLocalIceCandidate(
+                        candidate.sdpMid ?: "",
+                        candidate.sdpMLineIndex,
+                        candidate.sdp
+                    )
+                } else {
+                    Log.d(
+                        TAG,
+                        "Buffered local ICE candidate until answer is sent: " +
+                            "${candidate.sdpMid}[${candidate.sdpMLineIndex}]"
+                    )
+                }
             }
 
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {
@@ -255,7 +293,13 @@ class GfnPeerConnection(
             RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY)
         )
 
-        Log.i(TAG, "PeerConnection created successfully")
+        val created = peerConnection != null
+        if (created) {
+            Log.i(TAG, "PeerConnection created successfully")
+        } else {
+            Log.e(TAG, "PeerConnection creation failed (factory unavailable?)")
+        }
+        return created
     }
 
     /**
@@ -306,17 +350,31 @@ class GfnPeerConnection(
      * CRITICAL: Do NOT modify or filter the SDP string; keep all attributes untouched.
      */
     fun handleRemoteOffer(sdp: String, nvstSdp: String?) {
+        val pc = peerConnection
+        if (pc == null) {
+            listener.onError("Cannot handle SDP offer: PeerConnection is not initialized")
+            return
+        }
         cachedNvstSdp = nvstSdp
+        synchronized(iceLock) {
+            pendingRemoteIceCandidates.clear()
+            pendingLocalIceCandidates.clear()
+            remoteDescriptionSet = false
+            answerSent = false
+        }
+        remoteIceAddedCount = 0
+        remoteIceAddFailureCount = 0
         // Must happen before setRemoteDescription: the answer's m=application is
         // negotiated from these locally-created channels.
         ensureInputDataChannels()
         Log.i(TAG, "Setting remote SDP offer (length=${sdp.length})")
         val sessionDescription = SessionDescription(SessionDescription.Type.OFFER, sdp)
 
-        peerConnection?.setRemoteDescription(object : SimpleSdpObserver("setRemoteDescription") {
+        pc.setRemoteDescription(object : SimpleSdpObserver("setRemoteDescription") {
             override fun onSetSuccess() {
                 super.onSetSuccess()
                 Log.i(TAG, "Remote description set successfully, now creating answer...")
+                flushRemoteIceCandidates()
                 createAnswer()
             }
 
@@ -354,6 +412,7 @@ class GfnPeerConnection(
                 Log.i(TAG, "Local description set successfully. Sending answer to signaling!")
                 val clientNvstSdp = NvstSdpBuilder.build(cachedNvstSdp.orEmpty(), 1280, 720, 60, 15, desc.description)
                 listener.onSendLocalAnswer(desc.description, clientNvstSdp)
+                flushLocalIceCandidates()
             }
 
             override fun onSetFailure(error: String?) {
@@ -366,15 +425,81 @@ class GfnPeerConnection(
     fun addRemoteIceCandidate(sdpMid: String, sdpMLineIndex: Int, candidate: String) {
         remoteIceCandidateCount++
         val iceCandidate = IceCandidate(sdpMid, sdpMLineIndex, candidate)
-        peerConnection?.addIceCandidate(iceCandidate)
-        Log.d(TAG, "Added remote ICE candidate: $sdpMid[$sdpMLineIndex]")
+        val ready = synchronized(iceLock) {
+            if (remoteDescriptionSet) {
+                true
+            } else {
+                pendingRemoteIceCandidates.add(iceCandidate)
+                false
+            }
+        }
+        if (!ready) {
+            Log.d(
+                TAG,
+                "Buffered remote ICE candidate until setRemoteDescription succeeds: " +
+                    "$sdpMid[$sdpMLineIndex]"
+            )
+            return
+        }
+        addRemoteIceCandidateNow(iceCandidate)
+    }
+
+    /** Adds one candidate and records the boolean result for diagnostics. */
+    private fun addRemoteIceCandidateNow(iceCandidate: IceCandidate) {
+        val added = peerConnection?.addIceCandidate(iceCandidate) ?: false
+        if (added) {
+            remoteIceAddedCount++
+            Log.d(
+                TAG,
+                "Added remote ICE candidate: ${iceCandidate.sdpMid}[${iceCandidate.sdpMLineIndex}]"
+            )
+        } else {
+            remoteIceAddFailureCount++
+            Log.w(
+                TAG,
+                "addIceCandidate returned false: " +
+                    "${iceCandidate.sdpMid}[${iceCandidate.sdpMLineIndex}] => ${iceCandidate.sdp}"
+            )
+        }
+    }
+
+    /** Flushes candidates that arrived before setRemoteDescription completed. */
+    private fun flushRemoteIceCandidates() {
+        val pending = synchronized(iceLock) {
+            remoteDescriptionSet = true
+            pendingRemoteIceCandidates.toList().also { pendingRemoteIceCandidates.clear() }
+        }
+        Log.i(TAG, "Remote description ready; flushing ${pending.size} buffered ICE candidate(s)")
+        pending.forEach { addRemoteIceCandidateNow(it) }
+    }
+
+    /** Flushes candidates gathered before the answer was handed to signaling. */
+    private fun flushLocalIceCandidates() {
+        val pending = synchronized(iceLock) {
+            answerSent = true
+            pendingLocalIceCandidates.toList().also { pendingLocalIceCandidates.clear() }
+        }
+        Log.i(TAG, "Answer sent; flushing ${pending.size} buffered local ICE candidate(s)")
+        pending.forEach { candidate ->
+            listener.onSendLocalIceCandidate(
+                candidate.sdpMid ?: "",
+                candidate.sdpMLineIndex,
+                candidate.sdp
+            )
+        }
     }
 
     /** Counts, candidate types, active ICE URLs, and last known states for the banner. */
     fun iceDiagnosticSummary(): String {
         val iceUrls = usedIceServerUrls.joinToString(", ").ifEmpty { "n/a" }
+        val pendingRemote = synchronized(iceLock) { pendingRemoteIceCandidates.size }
+        val pendingLocal = synchronized(iceLock) { pendingLocalIceCandidates.size }
         return "ICE diagnostics: localCandidatesSent=$localIceCandidateCount, " +
             "remoteCandidatesReceived=$remoteIceCandidateCount, " +
+            "remoteCandidatesAdded=$remoteIceAddedCount, " +
+            "remoteCandidatesFailed=$remoteIceAddFailureCount, " +
+            "remoteCandidatesPending=$pendingRemote, " +
+            "localCandidatesPending=$pendingLocal, " +
             "localByType=host:$localHostCandidateCount/srflx:$localSrflxCandidateCount/relay:$localRelayCandidateCount, " +
             "iceServers=$iceUrls, " +
             "lastIceState=${lastIceConnectionState?.name ?: "n/a"}, " +
@@ -383,6 +508,12 @@ class GfnPeerConnection(
 
     fun dispose() {
         Log.i(TAG, "Disposing PeerConnection resources...")
+        synchronized(iceLock) {
+            pendingRemoteIceCandidates.clear()
+            pendingLocalIceCandidates.clear()
+            remoteDescriptionSet = false
+            answerSent = false
+        }
         try {
             peerConnection?.close()
             peerConnection?.dispose()
