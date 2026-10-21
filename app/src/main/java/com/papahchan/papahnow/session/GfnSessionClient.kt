@@ -712,7 +712,7 @@ class GfnSessionClient(
                 .put(payload.toRequestBody("application/json".toMediaType()))
                 .build()
             Log.d(TAG, maskedHeaders(request))
-            httpClient.newCall(request).execute().use { response ->
+            val outcome = httpClient.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (response.isSuccessful) {
                     CrashDiagnostics.setStage("CLAIM_DONE sessionId=$sessionId")
@@ -741,6 +741,26 @@ class GfnSessionClient(
                     iceServers = iceServers
                 )
             }
+
+            if (outcome.httpCode?.let { it in 200..299 } == true) {
+                // NanaPlay reads ICE servers from the post-claim GET poll; the PUT
+                // response itself does not carry iceServerConfiguration.
+                val polledIceServers = fetchClaimIceServers(
+                    claimHost,
+                    sessionId,
+                    authToken,
+                    clientId
+                )
+                val mergedIceServers = mergeIceServers(outcome.iceServers, polledIceServers)
+                Log.i(
+                    TAG,
+                    "Claim ICE servers: PUT=${outcome.iceServers.size}, " +
+                        "GET=${polledIceServers.size}, total=${mergedIceServers.size}"
+                )
+                outcome.copy(iceServers = mergedIceServers)
+            } else {
+                outcome
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
             ClaimOutcome(
@@ -755,6 +775,62 @@ class GfnSessionClient(
                 iceServers = iceServers
             )
         }
+    }
+
+    /**
+     * The claim PUT response does not include iceServerConfiguration. Poll the same
+     * session URL up to 3 times (1s apart) and stop as soon as a non-empty list of
+     * ICE servers is present, matching the native client's post-claim GET.
+     */
+    private fun fetchClaimIceServers(
+        host: String,
+        sessionId: String,
+        authToken: String,
+        clientId: String
+    ): List<IceServerConfig> {
+        val pollUrl = "https://$host/v2/session/$sessionId"
+        for (attempt in 1..3) {
+            try {
+                if (attempt > 1) Thread.sleep(1000L)
+                val request = cloudmatchRequest(pollUrl, authToken, clientId)
+                    .get()
+                    .build()
+                val servers = httpClient.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string() ?: ""
+                    Log.i(
+                        TAG,
+                        "Post-claim ICE poll $attempt/3: host=$host, HTTP ${response.code}"
+                    )
+                    if (response.isSuccessful) {
+                        parseSessionJsonLenient(responseBody)
+                            ?.let { resolveIceServersLenient(it) }
+                            .orEmpty()
+                    } else {
+                        emptyList()
+                    }
+                }
+                if (servers.isNotEmpty()) return servers
+            } catch (e: Exception) {
+                Log.w(TAG, "Post-claim ICE poll $attempt/3 failed", e)
+            }
+        }
+        return emptyList()
+    }
+
+    /** Merges ICE server lists in order, keeping the first occurrence of each URL. */
+    private fun mergeIceServers(
+        first: List<IceServerConfig>,
+        second: List<IceServerConfig>
+    ): List<IceServerConfig> {
+        val seenUrls = linkedSetOf<String>()
+        val merged = mutableListOf<IceServerConfig>()
+        (first + second).forEach { config ->
+            val uniqueUrls = config.urls.filter { seenUrls.add(it) }
+            if (uniqueUrls.isNotEmpty()) {
+                merged.add(config.copy(urls = uniqueUrls))
+            }
+        }
+        return merged
     }
 
     /** Claim details shown in the signaling-failure banner (body capped at 1500). */
