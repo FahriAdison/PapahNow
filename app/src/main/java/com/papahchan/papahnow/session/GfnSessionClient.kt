@@ -12,7 +12,9 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -449,6 +451,55 @@ class GfnSessionClient(
         return chosen
     }
 
+    /** Reads a JSON scalar as text, treating null/blank/non-scalar values as absent. */
+    private fun JsonObject.stringOrNull(key: String): String? {
+        val element = this[key] ?: return null
+        if (element is JsonNull) return null
+        return runCatching { element.jsonPrimitive.content }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    /** Parses the `session` object of a CloudMatch response without strict decoding. */
+    private fun parseSessionJsonLenient(body: String): JsonObject? = runCatching {
+        json.parseToJsonElement(body).jsonObject["session"]?.jsonObject
+    }.getOrNull()
+
+    /**
+     * Resolves the streaming host directly from raw session JSON. The strict
+     * SessionData decode can reject real responses (unknown/mistyped fields), so
+     * claim/prefetch host re-resolution must not depend on it. Same order as
+     * claimHost(): first usage=14 entry's ip -> its resourcePath host ->
+     * sessionControlInfo.ip.
+     */
+    private fun resolveHostLenient(sessionJson: JsonObject): String? {
+        val connectionInfo = sessionJson["connectionInfo"]
+            ?.let { runCatching { it.jsonArray }.getOrNull() }
+            .orEmpty()
+        val signaling = connectionInfo
+            .asSequence()
+            .mapNotNull { runCatching { it.jsonObject }.getOrNull() }
+            .firstOrNull {
+                it.stringOrNull("usage")?.toIntOrNull() == SIGNALING_USAGE_TYPE
+            }
+        val signalingIp = signaling?.stringOrNull("ip")
+        val resourcePath = signaling?.stringOrNull("resourcePath")
+        val resourceHost = extractHostFromUrl(resourcePath)
+        val controlIp = sessionJson["sessionControlInfo"]
+            ?.let { runCatching { it.jsonObject }.getOrNull() }
+            ?.stringOrNull("ip")
+
+        val chosen = usableSessionHost(signalingIp)
+            ?: resourceHost
+            ?: usableSessionHost(controlIp)
+        Log.i(
+            TAG,
+            "Lenient host resolution: signalingIp=$signalingIp, resourcePath=$resourcePath " +
+                "(host=$resourceHost), sessionControlIp=$controlIp -> $chosen"
+        )
+        return chosen
+    }
+
     private fun SessionData.effectiveQueuePosition(): Int? =
         queuePosition ?: seatSetupInfo?.queuePosition
 
@@ -548,7 +599,9 @@ class GfnSessionClient(
         // Host used for the prefetch GET, before re-resolution.
         val prefetchHost: String = host,
         val prefetchHttpCode: Int? = null,
-        val prefetchError: String? = null
+        val prefetchError: String? = null,
+        // Host from the 2xx claim response's own connectionInfo (lenient parse).
+        val latestHost: String? = null
     )
 
     /**
@@ -571,6 +624,7 @@ class GfnSessionClient(
         var claimHost = host
         var prefetchHttpCode: Int? = null
         var prefetchError: String? = null
+        var latestHost: String? = null
 
         // Prefetch: same CloudMatch identity headers as polling. A failure here is
         // never fatal; the PUT still falls back to the original host.
@@ -586,13 +640,10 @@ class GfnSessionClient(
                 Log.i(TAG, "Claim prefetch: host=$host, HTTP ${prefetchResponse.code}")
                 Log.d(TAG, "Claim prefetch body: ${prefetchBody.take(2000)}")
                 if (prefetchResponse.isSuccessful) {
-                    // Re-resolve via the same chain as claimHost(): usage=14 ip ->
-                    // resourcePath host -> sessionControlInfo.ip.
-                    val resolvedHost = runCatching {
-                        json.decodeFromString<SessionResponse>(prefetchBody)
-                            .session
-                            ?.claimHost()
-                    }.getOrNull()
+                    // Re-resolve from raw JSON; the strict SessionResponse decode can
+                    // fail on real responses and silently leave the stale host here.
+                    val resolvedHost = parseSessionJsonLenient(prefetchBody)
+                        ?.let { resolveHostLenient(it) }
                     if (resolvedHost != null) {
                         claimHost = resolvedHost
                         Log.i(TAG, "Claim prefetch re-resolved host: $host -> $claimHost")
@@ -626,6 +677,11 @@ class GfnSessionClient(
                 if (response.isSuccessful) {
                     CrashDiagnostics.setStage("CLAIM_DONE sessionId=$sessionId")
                     Log.i(TAG, "Session claim accepted: HTTP ${response.code}")
+                    // The 2xx claim body carries the authoritative connectionInfo;
+                    // the poll-derived session host can still point at the old server.
+                    latestHost = parseSessionJsonLenient(responseBody)
+                        ?.let { resolveHostLenient(it) }
+                    Log.i(TAG, "Claim response latest host: $latestHost")
                 } else {
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
                 }
@@ -637,7 +693,8 @@ class GfnSessionClient(
                     responseBody = responseBody,
                     prefetchHost = host,
                     prefetchHttpCode = prefetchHttpCode,
-                    prefetchError = prefetchError
+                    prefetchError = prefetchError,
+                    latestHost = latestHost
                 )
             }
         } catch (e: Exception) {
@@ -649,7 +706,8 @@ class GfnSessionClient(
                 error = e.localizedMessage,
                 prefetchHost = host,
                 prefetchHttpCode = prefetchHttpCode,
-                prefetchError = prefetchError
+                prefetchError = prefetchError,
+                latestHost = latestHost
             )
         }
     }
@@ -663,9 +721,22 @@ class GfnSessionClient(
         val putHttp = claim.httpCode?.toString()
             ?: claim.error
             ?: "n/a"
+        val claimJson = claim.responseBody
+            .takeIf { it.isNotBlank() }
+            ?.let { runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        val requestStatus = claimJson?.get("requestStatus")
+            ?.let { runCatching { it.jsonObject }.getOrNull() }
+        val claimSession = claimJson?.get("session")
+            ?.let { runCatching { it.jsonObject }.getOrNull() }
+        val statusCode = requestStatus?.stringOrNull("statusCode") ?: "n/a"
+        val statusDescription = requestStatus?.stringOrNull("statusDescription") ?: "n/a"
+        val sessionStatus = claimSession?.stringOrNull("status") ?: "n/a"
         return buildString {
             append("Claim prefetch: host=${claim.prefetchHost}, HTTP=$prefetchHttp\n")
-            append("Claim PUT: host=${claim.host}, HTTP=$putHttp")
+            append("Claim PUT: host=${claim.host}, HTTP=$putHttp\n")
+            append("Claim requestStatus.statusCode: $statusCode\n")
+            append("Claim requestStatus.statusDescription: $statusDescription\n")
+            append("Claim session.status: $sessionStatus")
             if (claim.responseBody.isNotBlank()) {
                 append("\nClaim response (max 1500):\n")
                 append(claim.responseBody.take(1500))
@@ -992,9 +1063,18 @@ class GfnSessionClient(
 
             // Validated with the same fallback chain as the claim host: a malformed
             // usage=14 ip (e.g. ".cloudmatchbeta...") must not reach OkHttp as a URL.
-            val host = usableSessionHost(signalingInfo.ip)
+            // The 2xx claim response is authoritative: its connectionInfo can name a
+            // different server than the stale poll merge (v34: .38 vs .36).
+            val pollHost = usableSessionHost(signalingInfo.ip)
                 ?: session.claimHost()
+            val host = claimOutcome?.latestHost
+                ?: pollHost
                 ?: return@withContext Result.failure(Exception("No usable signaling host in connectionInfo: $connectionList"))
+            Log.i(
+                TAG,
+                "Signaling host selection: claimResponse=${claimOutcome?.latestHost}, " +
+                    "poll=$pollHost -> $host"
+            )
             // GFN signaling is always WSS regardless of appLevelProtocol (usage=14
             // entries carry 6, not 5): NanaPlay hardcodes wss:// and the HTTPS web
             // client cannot open ws://. Do not relax the network security policy.
