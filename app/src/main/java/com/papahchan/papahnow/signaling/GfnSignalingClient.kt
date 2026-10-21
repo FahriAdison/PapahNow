@@ -66,7 +66,8 @@ class GfnSignalingClient(
     @Volatile
     private var lastAnswerSummary: String = ""
     private val ackSequence = AtomicInteger(1)
-    private var clientId: Int = 2 // default client peer id is 2, updated by peer_info
+    // Native clients start at 0 and only adopt an id from a peer_info whose name matches peerName.
+    private var clientId: Int = 0
     private var serverPeerId: Int = 1 // default server peer id is 1
     // NanaPlay native handshake: 12 random hex chars from a dashless UUID.
     private val peerName = "peer-" + UUID.randomUUID().toString().replace("-", "").take(12)
@@ -101,6 +102,7 @@ class GfnSignalingClient(
         webSocket = okHttpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket connected successfully (HTTP ${response.code})")
+                sendPeerInfo(webSocket)
                 startHeartbeat()
                 listener.onSignalingConnected()
             }
@@ -122,10 +124,15 @@ class GfnSignalingClient(
                         sendAck(ackId)
                     }
 
-                    // 3. Peer assignment info
+                    // 3. Peer assignment info. The server also sends its own peer_info
+                    // (id=1); only adopt an id whose name matches our sign-in peerName.
                     envelope.peerInfo?.let { peerInfo ->
-                        clientId = peerInfo.id
-                        Log.i(TAG, "Assigned client peer id: $clientId, name: ${peerInfo.name}")
+                        if (peerInfo.name == peerName) {
+                            clientId = peerInfo.id
+                            Log.i(TAG, "Assigned client peer id: $clientId, name: ${peerInfo.name}")
+                        } else {
+                            Log.i(TAG, "Ignoring peer_info id=${peerInfo.id}, name=${peerInfo.name} (ours=$peerName)")
+                        }
                     }
 
                     // 4. Peer message (Offer / Candidate / etc.)
@@ -177,6 +184,18 @@ class GfnSignalingClient(
                 listener.onSignalingError(t)
             }
         })
+    }
+
+    /**
+     * Announces this client peer right after the WebSocket handshake, matching the
+     * native client's peer_info. Sent once per connection.
+     */
+    private fun sendPeerInfo(socket: WebSocket) {
+        val ackId = ackSequence.getAndIncrement()
+        val message =
+            """{"ackid":$ackId,"peer_info":{"browser":"Chrome","browserVersion":"131","connected":true,"id":$clientId,"name":"$peerName","peerRole":0,"resolution":"1280x720","version":2}}"""
+        Log.i(TAG, "Signaling SEND PEER_INFO: $message")
+        socket.send(message)
     }
 
     private fun startHeartbeat() {
