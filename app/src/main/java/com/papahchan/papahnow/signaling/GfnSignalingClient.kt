@@ -7,6 +7,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -31,7 +32,7 @@ class GfnSignalingClient(
         private const val TAG = "GfnSignaling"
 
         // WebRTC handshake values from the browser/NanaPlay client.
-        private const val SIGNALING_VERSION = "3.0"
+        private const val SIGNALING_VERSION = "2"
         private const val SIGNALING_ORIGIN = "https://play.geforcenow.com"
         private const val SIGNALING_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
@@ -47,7 +48,8 @@ class GfnSignalingClient(
     private val ackSequence = AtomicInteger(1)
     private var clientId: Int = 2 // default client peer id is 2, updated by peer_info
     private var serverPeerId: Int = 1 // default server peer id is 1
-    private val peerName = "peer-" + (1000000000L + (Math.random() * 9000000000L).toLong())
+    // NanaPlay native handshake: 12 random hex chars from a dashless UUID.
+    private val peerName = "peer-" + UUID.randomUUID().toString().replace("-", "").take(12)
 
     fun connect() {
         val scheme = if (secure) "wss" else "ws"
@@ -67,6 +69,8 @@ class GfnSignalingClient(
         Log.i(TAG, "Connecting to signaling server: $fullUrl (peerName: $peerName)")
 
         val requestBuilder = Request.Builder().url(fullUrl)
+            // Explicit Host without port, matching the native/web GDK handshake.
+            .addHeader("Host", host)
             .addHeader("Origin", SIGNALING_ORIGIN)
             .addHeader("User-Agent", SIGNALING_USER_AGENT)
         if (!sessionId.isNullOrEmpty()) {
