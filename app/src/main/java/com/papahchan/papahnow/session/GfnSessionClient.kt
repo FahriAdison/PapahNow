@@ -80,7 +80,9 @@ data class SignalingServerInfo(
     val port: Int,
     val secure: Boolean,
     val resourcePath: String?,
-    val sessionId: String
+    val sessionId: String,
+    // Claim prefetch/PUT details, surfaced in the error banner if signaling fails.
+    val claimDiagnostics: String = ""
 )
 
 class GfnSessionClient(
@@ -537,17 +539,24 @@ class GfnSessionClient(
 
     /** Result of the claim attempt, retained for the polling diagnostic banner. */
     private data class ClaimOutcome(
+        // Host actually used for the PUT (possibly re-resolved by the prefetch).
         val host: String,
         val url: String,
         val httpCode: Int?,
         val error: String? = null,
-        val responseBody: String = ""
+        val responseBody: String = "",
+        // Host used for the prefetch GET, before re-resolution.
+        val prefetchHost: String = host,
+        val prefetchHttpCode: Int? = null,
+        val prefetchError: String? = null
     )
 
     /**
      * Claims the session once CloudMatch reports it ready (status 2/3 and a
-     * usage=14 signaling ip). The signaling endpoint rejects the WebSocket
-     * handshake (503) until the session is claimed.
+     * usage=14 signaling ip). Before the PUT, NanaPlay first prefetches the
+     * session via GET against the assigned host and re-resolves the claim host
+     * from that response; doing the PUT against the stale host sent signaling
+     * to the wrong server (404 on /nvst/sign_in).
      */
     private fun claimSession(
         host: String,
@@ -559,7 +568,43 @@ class GfnSessionClient(
         height: Int,
         fps: Int
     ): ClaimOutcome {
-        val url = "https://$host/v2/session/$sessionId?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
+        var claimHost = host
+        var prefetchHttpCode: Int? = null
+        var prefetchError: String? = null
+
+        // Prefetch: same CloudMatch identity headers as polling. A failure here is
+        // never fatal; the PUT still falls back to the original host.
+        val prefetchUrl = "https://$host/v2/session/$sessionId"
+        Log.i(TAG, "Claim prefetch GET $prefetchUrl")
+        try {
+            val prefetchRequest = cloudmatchRequest(prefetchUrl, authToken, clientId)
+                .get()
+                .build()
+            httpClient.newCall(prefetchRequest).execute().use { prefetchResponse ->
+                prefetchHttpCode = prefetchResponse.code
+                val prefetchBody = prefetchResponse.body?.string() ?: ""
+                Log.i(TAG, "Claim prefetch: host=$host, HTTP ${prefetchResponse.code}")
+                Log.d(TAG, "Claim prefetch body: ${prefetchBody.take(2000)}")
+                if (prefetchResponse.isSuccessful) {
+                    // Re-resolve via the same chain as claimHost(): usage=14 ip ->
+                    // resourcePath host -> sessionControlInfo.ip.
+                    val resolvedHost = runCatching {
+                        json.decodeFromString<SessionResponse>(prefetchBody)
+                            .session
+                            ?.claimHost()
+                    }.getOrNull()
+                    if (resolvedHost != null) {
+                        claimHost = resolvedHost
+                        Log.i(TAG, "Claim prefetch re-resolved host: $host -> $claimHost")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            prefetchError = e.localizedMessage
+            Log.w(TAG, "Claim prefetch failed; keeping host $host", e)
+        }
+
+        val url = "https://$claimHost/v2/session/$sessionId?keyboardLayout=$KEYBOARD_LAYOUT&languageCode=$LANGUAGE_CODE"
         val payload = buildJsonObject {
             put("action", 2)
             put("data", "RESUME")
@@ -585,11 +630,46 @@ class GfnSessionClient(
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
                 }
                 Log.d(TAG, "Claim response body: $responseBody")
-                ClaimOutcome(host = host, url = url, httpCode = response.code, responseBody = responseBody)
+                ClaimOutcome(
+                    host = claimHost,
+                    url = url,
+                    httpCode = response.code,
+                    responseBody = responseBody,
+                    prefetchHost = host,
+                    prefetchHttpCode = prefetchHttpCode,
+                    prefetchError = prefetchError
+                )
             }
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
-            ClaimOutcome(host = host, url = url, httpCode = null, error = e.localizedMessage)
+            ClaimOutcome(
+                host = claimHost,
+                url = url,
+                httpCode = null,
+                error = e.localizedMessage,
+                prefetchHost = host,
+                prefetchHttpCode = prefetchHttpCode,
+                prefetchError = prefetchError
+            )
+        }
+    }
+
+    /** Claim details shown in the signaling-failure banner (body capped at 1500). */
+    private fun buildClaimDiagnostics(claim: ClaimOutcome?): String {
+        if (claim == null) return ""
+        val prefetchHttp = claim.prefetchHttpCode?.toString()
+            ?: claim.prefetchError
+            ?: "n/a"
+        val putHttp = claim.httpCode?.toString()
+            ?: claim.error
+            ?: "n/a"
+        return buildString {
+            append("Claim prefetch: host=${claim.prefetchHost}, HTTP=$prefetchHttp\n")
+            append("Claim PUT: host=${claim.host}, HTTP=$putHttp")
+            if (claim.responseBody.isNotBlank()) {
+                append("\nClaim response (max 1500):\n")
+                append(claim.responseBody.take(1500))
+            }
         }
     }
 
@@ -626,12 +706,16 @@ class GfnSessionClient(
         } else {
             val accepted = claim.httpCode?.let { it in 200..299 } ?: false
             val http = claim.httpCode?.toString() ?: "error: ${claim.error ?: "unknown"}"
+            val prefetchHttp = claim.prefetchHttpCode?.toString()
+                ?: claim.prefetchError
+                ?: "n/a"
+            append("  prefetch: host=${claim.prefetchHost}, HTTP=$prefetchHttp\n")
             append("  attempts: $claimAttempts, accepted: $accepted\n")
             append("  last host: ${claim.host}, HTTP: $http\n")
             append("  URL: PUT ${claim.url}\n")
             if (!accepted && claim.responseBody.isNotBlank()) {
-                append("  Response:\n")
-                append(claim.responseBody).append('\n')
+                append("  Response (max 1500):\n")
+                append(claim.responseBody.take(1500)).append('\n')
             }
         }
         append("Polls:\n")
@@ -927,7 +1011,8 @@ class GfnSessionClient(
                     port = signalingPort,
                     secure = secure,
                     resourcePath = signalingInfo.resourcePath,
-                    sessionId = session.sessionId
+                    sessionId = session.sessionId,
+                    claimDiagnostics = buildClaimDiagnostics(claimOutcome)
                 )
             )
         } catch (e: Exception) {

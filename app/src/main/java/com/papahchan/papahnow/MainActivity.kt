@@ -101,6 +101,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private var signalingClient: GfnSignalingClient? = null
+    // Claim prefetch/PUT context from the last session creation, appended to the
+    // banner if the WebSocket handshake fails.
+    private var signalingClaimDiagnostics: String = ""
     private var peerConnectionWrapper: GfnPeerConnection? = null
     private var streamRenderer: StreamRenderer? = null
 
@@ -316,6 +319,7 @@ class MainActivity : ComponentActivity() {
     private fun connectSignaling(serverInfo: SignalingServerInfo) {
         connectionState = ConnectionState.SIGNALING
         statusDetail = "Connecting to signaling server ${serverInfo.host}:${serverInfo.port}..."
+        signalingClaimDiagnostics = serverInfo.claimDiagnostics
 
         try {
             CrashDiagnostics.setStage(
@@ -339,7 +343,11 @@ class MainActivity : ComponentActivity() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Signaling setup failed", e)
-            errorMessage = "Signaling setup failed: ${e.localizedMessage}"
+            val claimDetails = signalingClaimDiagnostics
+                .takeIf { it.isNotBlank() }
+                ?.let { "\n$it" }
+                .orEmpty()
+            errorMessage = "Signaling setup failed: ${e.localizedMessage}$claimDetails"
             connectionState = ConnectionState.DISCONNECTED
         }
     }
@@ -378,7 +386,11 @@ class MainActivity : ComponentActivity() {
         override fun onSignalingError(t: Throwable) {
             runOnUiThread {
                 Log.e(TAG, "Signaling error", t)
-                errorMessage = "Signaling error: ${t.localizedMessage}"
+                val claimDetails = signalingClaimDiagnostics
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "\n$it" }
+                    .orEmpty()
+                errorMessage = "Signaling error: ${t.localizedMessage}$claimDetails"
                 connectionState = ConnectionState.DISCONNECTED
             }
         }
@@ -447,6 +459,7 @@ class MainActivity : ComponentActivity() {
     private fun disconnectAll() {
         signalingClient?.disconnect()
         signalingClient = null
+        signalingClaimDiagnostics = ""
         streamRenderer?.detachVideoTrack()
         peerConnectionWrapper?.dispose()
         peerConnectionWrapper = GfnPeerConnection(this, peerConnectionListener)
