@@ -3,8 +3,11 @@ package com.papahchan.papahnow.session
 import android.util.Log
 import com.papahchan.papahnow.diagnostics.CrashDiagnostics
 import com.papahchan.papahnow.signaling.IceServerConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -23,6 +26,7 @@ import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 import java.util.TimeZone
@@ -170,6 +174,17 @@ class GfnSessionClient(
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
+
+    // Identity of the create/claim/poll flow, reused by the stop request.
+    @Volatile
+    private var flowClientId: String? = null
+
+    // Session id becomes available as soon as create succeeds, i.e. before the
+    // queue/claim finishes, so a user cancel can still release the allocation.
+    @Volatile
+    private var allocatedSessionId: String? = null
+
+    fun currentSessionId(): String? = allocatedSessionId
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -690,6 +705,8 @@ class GfnSessionClient(
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             prefetchError = e.localizedMessage
             Log.w(TAG, "Claim prefetch failed; keeping host $host", e)
@@ -761,6 +778,8 @@ class GfnSessionClient(
             } else {
                 outcome
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Session claim request error", e)
             ClaimOutcome(
@@ -810,6 +829,8 @@ class GfnSessionClient(
                     }
                 }
                 if (servers.isNotEmpty()) return servers
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Post-claim ICE poll $attempt/3 failed", e)
             }
@@ -942,6 +963,8 @@ class GfnSessionClient(
         // The old constant id was in place for a full day and matches the
         // spontaneous ~11:03 regression (suspected server-side dedup/throttle).
         val clientId = UUID.randomUUID().toString()
+        flowClientId = clientId
+        allocatedSessionId = null
         val baseEndpoint = "${cloudmatchUrl.trimEnd('/')}/v2/session"
         // Polling stays on the zone base for the whole flow. The assigned server
         // host (claimHost()) is only for the claim PUT: some raw server IPs answer
@@ -965,7 +988,7 @@ class GfnSessionClient(
         Log.d(TAG, "Request body: $payload")
 
         try {
-            var response = httpClient.newCall(request).execute()
+            val response = httpClient.newCall(request).execute()
             var body = response.body?.string() ?: ""
 
             if (!response.isSuccessful) {
@@ -987,6 +1010,7 @@ class GfnSessionClient(
 
             var sessionResp = json.decodeFromString<SessionResponse>(body)
             var session = sessionResp.session ?: return@withContext Result.failure(Exception("No session object in response: $body"))
+            allocatedSessionId = session.sessionId.takeIf { it.isNotBlank() }
             // Kept for the polling diagnostic banner (body is reassigned by polls).
             val createResponseBody = body
 
@@ -1011,6 +1035,7 @@ class GfnSessionClient(
             var lastPollBody = ""
             var terminalStatus: Int? = null
             var consecutivePoll500s = 0
+            var consecutiveTransportFailures = 0
             var consecutive500Abort = false
             while (retries < MAX_POLL_ATTEMPTS) {
                 delay(POLL_INTERVAL_MS)
@@ -1025,14 +1050,41 @@ class GfnSessionClient(
                     .get()
                     .build()
 
-                response = httpClient.newCall(pollReq).execute()
-                body = response.body?.string() ?: ""
-                lastPollBody = body
-                if (!response.isSuccessful) {
-                    pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, status=n/a, connectionInfo=no, url=$pollUrl"
-                    Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${response.code}: $body")
+                // A single transport failure (Wi-Fi -> LTE handoff, DNS flap,
+                // read timeout) must not kill the whole queue: count it, report
+                // it, and keep polling until the 30-minute budget is exhausted.
+                val pollResponse: Response
+                try {
+                    pollResponse = httpClient.newCall(pollReq).execute()
+                    body = pollResponse.body?.string() ?: ""
+                    // The blocking call above is not cancellable; observe a
+                    // Disconnect that happened while it was in flight before
+                    // processing/claiming this response.
+                    currentCoroutineContext().ensureActive()
+                } catch (e: CancellationException) {
+                    // User cancelled the queue: propagate, never treat as a poll failure.
+                    throw e
+                } catch (e: Exception) {
+                    consecutiveTransportFailures++
+                    lastPollBody = "transport error: ${e.javaClass.simpleName}: ${e.localizedMessage}"
+                    pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: transport error " +
+                        "${e.javaClass.simpleName}: ${e.localizedMessage} " +
+                        "(consecutive=$consecutiveTransportFailures), url=$pollUrl"
+                    Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS transport error", e)
                     val failedHost = runCatching { URI(pollUrl).host }.getOrNull() ?: pollUrl
-                    if (response.code == 500) {
+                    onProgress(
+                        "Session poll error @ $failedHost (${e.javaClass.simpleName}, " +
+                            "consecutive=$consecutiveTransportFailures); retrying..."
+                    )
+                    continue
+                }
+                consecutiveTransportFailures = 0
+                lastPollBody = body
+                if (!pollResponse.isSuccessful) {
+                    pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${pollResponse.code}, status=n/a, connectionInfo=no, url=$pollUrl"
+                    Log.w(TAG, "Poll $retries/$MAX_POLL_ATTEMPTS failed: HTTP ${pollResponse.code}: $body")
+                    val failedHost = runCatching { URI(pollUrl).host }.getOrNull() ?: pollUrl
+                    if (pollResponse.code == 500) {
                         consecutivePoll500s++
                         if (consecutivePoll500s >= MAX_CONSECUTIVE_POLL_500S) {
                             consecutive500Abort = true
@@ -1043,7 +1095,7 @@ class GfnSessionClient(
                     } else {
                         consecutivePoll500s = 0
                     }
-                    onProgress("Session poll failed (HTTP ${response.code}) @ $failedHost; retrying...")
+                    onProgress("Session poll failed (HTTP ${pollResponse.code}) @ $failedHost; retrying...")
                     continue
                 }
                 consecutivePoll500s = 0
@@ -1052,8 +1104,9 @@ class GfnSessionClient(
                 // Merge: queued responses omit connectionInfo/sessionControlInfo, so a
                 // replace would erase a server host learned from an earlier response.
                 session = session.mergedWith(sessionResp.session ?: session)
+                allocatedSessionId = session.sessionId.takeIf { it.isNotBlank() }
                 val connectionSummary = session.connectionInfo?.let { "yes(${it.size})" } ?: "no"
-                pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${response.code}, " +
+                pollLines += "Poll $retries/$MAX_POLL_ATTEMPTS: HTTP ${pollResponse.code}, " +
                     "status=${session.status}, queue=${session.effectiveQueuePosition()}, " +
                     "connectionInfo=$connectionSummary, url=$pollUrl"
                 Log.i(
@@ -1083,6 +1136,8 @@ class GfnSessionClient(
                         pollLines += "Claim skipped: ready but no usable server host"
                         onProgress("Session ready but no server host yet; retrying...")
                     } else {
+                        // A cancelled queue must never claim an allocation.
+                        currentCoroutineContext().ensureActive()
                         claimAttempts++
                         val outcome = claimSession(
                             host,
@@ -1217,9 +1272,44 @@ class GfnSessionClient(
                     iceServers = claimOutcome?.iceServers.orEmpty()
                 )
             )
+        } catch (e: CancellationException) {
+            // Queue cancelled by the user / Activity teardown.
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Exception during session creation", e)
             Result.failure(e)
         }
     }
+
+    /**
+     * Releases a Cloudmatch allocation with `DELETE /v2/session/{id}` using the
+     * same identity/auth headers as create/claim/poll. Best effort only: a
+     * non-2xx response is logged, never thrown to the caller.
+     */
+    suspend fun stopSession(authToken: String, sessionId: String): Result<Int> =
+        withContext(Dispatchers.IO) {
+            val clientId = flowClientId ?: UUID.randomUUID().toString()
+            val url = "${cloudmatchUrl.trimEnd('/')}/v2/session/${sessionId.trim()}"
+            try {
+                val request = cloudmatchRequest(url, authToken, clientId)
+                    .delete()
+                    .build()
+                Log.i(TAG, "Stopping Cloudmatch session $sessionId via DELETE $url")
+                httpClient.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        Log.i(TAG, "Cloudmatch session stop accepted: HTTP ${response.code}")
+                        Result.success(response.code)
+                    } else {
+                        Log.w(TAG, "Cloudmatch session stop failed: HTTP ${response.code}: $body")
+                        Result.failure(Exception("HTTP ${response.code}: ${body.take(500)}"))
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Cloudmatch session stop request error", e)
+                Result.failure(e)
+            }
+        }
 }

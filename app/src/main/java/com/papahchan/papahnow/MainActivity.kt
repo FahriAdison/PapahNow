@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.lifecycleScope
 import com.papahchan.papahnow.auth.GfnAuthManager
 import com.papahchan.papahnow.diagnostics.CrashDiagnostics
 import com.papahchan.papahnow.session.GfnSessionClient
@@ -54,6 +55,8 @@ import com.papahchan.papahnow.webrtc.GfnPeerConnection
 import com.papahchan.papahnow.webrtc.StreamRenderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.webrtc.PeerConnection
 import org.webrtc.VideoTrack
@@ -106,6 +109,16 @@ class MainActivity : ComponentActivity() {
     private var signalingClaimDiagnostics: String = ""
     private var peerConnectionWrapper: GfnPeerConnection? = null
     private var streamRenderer: StreamRenderer? = null
+
+    // Owned by the Activity lifecycle: cancelled on Disconnect/onDestroy so a
+    // queued session cannot keep polling and claiming in the background.
+    private var connectionJob: Job? = null
+    // Short-lived, process-independent teardown (Cloudmatch stop) that must be
+    // allowed to finish even when the Activity is destroyed.
+    private val sessionTeardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var activeSessionClient: GfnSessionClient? = null
+    private var activeAuthToken: String? = null
+    private var activeSessionId: String? = null
 
     // Compose observable state
     private var connectionState by mutableStateOf(ConnectionState.DISCONNECTED)
@@ -166,10 +179,15 @@ class MainActivity : ComponentActivity() {
             val error = uri.getQueryParameter("error")
             if (!code.isNullOrEmpty()) {
                 Log.i(TAG, "Authorization code received from redirect: $code")
+                // Never leave a previous session running when a new login flow
+                // is about to create another one.
+                if (connectionState != ConnectionState.DISCONNECTED) {
+                    disconnectAll()
+                }
                 authCodeInput = code
                 errorMessage = null
                 statusDetail = "Auth code received. Exchanging token..."
-                CoroutineScope(Dispatchers.Main).launch {
+                startConnectionJob {
                     proceedWithAuthCode(code)
                 }
             } else if (!error.isNullOrEmpty()) {
@@ -183,6 +201,11 @@ class MainActivity : ComponentActivity() {
 
     private fun startFullConnectionFlow() {
         CrashDiagnostics.setStage("CONNECT_PRESSED")
+        // Reconnecting from the debug panel while a session is active must tear
+        // the old one down first (including its Cloudmatch allocation).
+        if (connectionState != ConnectionState.DISCONNECTED) {
+            disconnectAll()
+        }
         errorMessage = null
         statusDetail = "Starting connection..."
 
@@ -200,7 +223,7 @@ class MainActivity : ComponentActivity() {
 
         // Case 3: Manual Auth Code already present
         if (authCodeInput.isNotBlank()) {
-            CoroutineScope(Dispatchers.Main).launch {
+            startConnectionJob {
                 proceedWithAuthCode(authCodeInput.trim())
             }
             return
@@ -239,7 +262,7 @@ class MainActivity : ComponentActivity() {
             val sessionToken = tokens.clientToken ?: tokens.accessToken
             authTokenInput = sessionToken
             statusDetail = "Token obtained! Creating session..."
-            createSessionAndConnect(sessionToken)
+            createSessionAndConnectInternal(sessionToken)
         }.onFailure { ex ->
             Log.e(TAG, "Token exchange failed", ex)
             errorMessage = "Token exchange failed: ${ex.localizedMessage}"
@@ -273,24 +296,44 @@ class MainActivity : ComponentActivity() {
         connectionState = ConnectionState.CREATING_SESSION
         statusDetail = "Requesting session from ${cloudmatchBaseUrl()}..."
 
-        CoroutineScope(Dispatchers.Main).launch {
-            // Built per Connect so a zone change applies without restarting the app.
-            val sessionClient = GfnSessionClient(
-                cloudmatchUrl = cloudmatchBaseUrl(),
-                deviceHashId = persistedDeviceId()
+        startConnectionJob {
+            createSessionAndConnectInternal(authToken)
+        }
+    }
+
+    private suspend fun createSessionAndConnectInternal(authToken: String) {
+        activeAuthToken = authToken
+        // Built per Connect so a zone change applies without restarting the app.
+        val sessionClient = GfnSessionClient(
+            cloudmatchUrl = cloudmatchBaseUrl(),
+            deviceHashId = persistedDeviceId()
+        )
+        activeSessionClient = sessionClient
+        val result = sessionClient.createStreamingSession(authToken) { progress ->
+            runOnUiThread { statusDetail = progress }
+        }
+        result.onSuccess { serverInfo ->
+            activeSessionId = serverInfo.sessionId
+            CrashDiagnostics.setStage("CREATE_OK sessionId=${serverInfo.sessionId}")
+            statusDetail = "Session created (${serverInfo.sessionId}). Connecting signaling..."
+            connectSignaling(serverInfo)
+        }.onFailure { ex ->
+            Log.e(TAG, "Session creation failed", ex)
+            // Stop any allocation that was created before the failure (queue
+            // timeout, claim failure, ...) instead of letting it burn quota.
+            teardownConnection(
+                statusText = "Disconnected",
+                errorText = "Session creation failed: ${ex.localizedMessage}",
+                recreate = true
             )
-            val result = sessionClient.createStreamingSession(authToken) { progress ->
-                runOnUiThread { statusDetail = progress }
-            }
-            result.onSuccess { serverInfo ->
-                CrashDiagnostics.setStage("CREATE_OK sessionId=${serverInfo.sessionId}")
-                statusDetail = "Session created (${serverInfo.sessionId}). Connecting signaling..."
-                connectSignaling(serverInfo)
-            }.onFailure { ex ->
-                Log.e(TAG, "Session creation failed", ex)
-                errorMessage = "Session creation failed: ${ex.localizedMessage}"
-                connectionState = ConnectionState.DISCONNECTED
-            }
+        }
+    }
+
+    /** Starts (and replaces) the single Activity-owned connection coroutine. */
+    private fun startConnectionJob(block: suspend () -> Unit) {
+        connectionJob?.cancel()
+        connectionJob = lifecycleScope.launch {
+            block()
         }
     }
 
@@ -390,21 +433,38 @@ class MainActivity : ComponentActivity() {
         override fun onSignalingClosed(code: Int, reason: String) {
             runOnUiThread {
                 Log.i(TAG, "Signaling closed: $code / $reason")
-                if (connectionState != ConnectionState.STREAMING) {
-                    statusDetail = "Signaling finished ($code)"
-                }
+                // Idempotent: a local disconnect may already have moved us here.
+                if (connectionState == ConnectionState.DISCONNECTED) return@runOnUiThread
+                val reasonSuffix = reason.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()
+                val unexpected = code != 1000 && code != 4001
+                teardownConnection(
+                    statusText = "Signaling finished ($code)$reasonSuffix",
+                    errorText = if (unexpected) {
+                        "Signaling closed unexpectedly ($code)$reasonSuffix"
+                    } else {
+                        null
+                    },
+                    recreate = true
+                )
             }
         }
 
         override fun onSignalingError(t: Throwable) {
             runOnUiThread {
+                // A local disconnect/onDestroy may race this failure callback.
+                if (connectionState == ConnectionState.DISCONNECTED) return@runOnUiThread
                 Log.e(TAG, "Signaling error", t)
                 val claimDetails = signalingClaimDiagnostics
                     .takeIf { it.isNotBlank() }
                     ?.let { "\n$it" }
                     .orEmpty()
-                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails${signalingIoDetails()}${iceDiagnostics()}"
-                connectionState = ConnectionState.DISCONNECTED
+                val message = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}" +
+                    claimDetails + signalingIoDetails() + iceDiagnostics()
+                teardownConnection(
+                    statusText = "Disconnected",
+                    errorText = message,
+                    recreate = true
+                )
             }
         }
     }
@@ -441,8 +501,9 @@ class MainActivity : ComponentActivity() {
                         connectionState = ConnectionState.CONNECTING
                     }
                 } else if (state == PeerConnection.IceConnectionState.FAILED) {
-                    errorMessage = "ICE connection failed${iceDiagnostics()}"
-                    connectionState = ConnectionState.DISCONNECTED
+                    if (connectionState != ConnectionState.DISCONNECTED) {
+                        failAndTeardown("ICE connection failed${iceDiagnostics()}")
+                    }
                 }
             }
         }
@@ -454,38 +515,113 @@ class MainActivity : ComponentActivity() {
                 if (state == PeerConnection.PeerConnectionState.CONNECTED) {
                     connectionState = ConnectionState.STREAMING
                 } else if (state == PeerConnection.PeerConnectionState.FAILED) {
-                    errorMessage = "WebRTC PeerConnection failed${iceDiagnostics()}"
-                    connectionState = ConnectionState.DISCONNECTED
+                    if (connectionState != ConnectionState.DISCONNECTED) {
+                        failAndTeardown("WebRTC PeerConnection failed${iceDiagnostics()}")
+                    }
                 }
             }
         }
 
         override fun onError(description: String) {
             runOnUiThread {
+                if (connectionState == ConnectionState.DISCONNECTED) return@runOnUiThread
                 Log.e(TAG, "PeerConnection error: $description")
-                errorMessage = description + iceDiagnostics()
-                connectionState = ConnectionState.DISCONNECTED
+                failAndTeardown(description + iceDiagnostics())
             }
         }
     }
 
+    private fun failAndTeardown(message: String) {
+        Log.e(TAG, "Tearing down after failure: $message")
+        teardownConnection(
+            statusText = "Disconnected",
+            errorText = message,
+            recreate = true
+        )
+    }
+
     private fun disconnectAll() {
-        signalingClient?.disconnect()
-        signalingClient = null
-        signalingClaimDiagnostics = ""
-        streamRenderer?.detachVideoTrack()
-        peerConnectionWrapper?.dispose()
-        peerConnectionWrapper = GfnPeerConnection(this, peerConnectionListener)
+        teardownConnection(
+            statusText = "Disconnected",
+            errorText = null,
+            recreate = true
+        )
+    }
+
+    /**
+     * Single teardown path for Disconnect, onDestroy, signaling close and
+     * watchdog/peer failures. Releases the renderer BEFORE the EGL context it
+     * was initialized with, then re-initializes it against the replacement
+     * wrapper's context so Connect -> Disconnect -> Connect keeps video.
+     */
+    private fun teardownConnection(
+        statusText: String,
+        errorText: String?,
+        recreate: Boolean
+    ) {
+        // Flip state first: late callbacks from the sockets/PeerConnection below
+        // then become no-ops instead of starting a second teardown.
         connectionState = ConnectionState.DISCONNECTED
-        statusDetail = "Disconnected"
-        errorMessage = null
+        connectionJob?.cancel()
+        connectionJob = null
+
+        val client = signalingClient
+        signalingClient = null
+        client?.disconnect()
+        signalingClaimDiagnostics = ""
+
+        stopActiveSession()
+
+        streamRenderer?.cleanUp()
+        peerConnectionWrapper?.dispose()
+        peerConnectionWrapper = null
+
+        if (recreate) {
+            val wrapper = GfnPeerConnection(this, peerConnectionListener)
+            peerConnectionWrapper = wrapper
+            streamRenderer?.initRenderer(wrapper.eglBase.eglBaseContext)
+        }
+
+        connectionState = ConnectionState.DISCONNECTED
+        statusDetail = statusText
+        errorMessage = errorText
+    }
+
+    /**
+     * Best-effort DELETE of the active Cloudmatch allocation. Runs outside the
+     * Activity lifecycle so onDestroy can still finish the request.
+     */
+    private fun stopActiveSession() {
+        val client = activeSessionClient
+        val authToken = activeAuthToken
+        val sessionId = activeSessionId ?: client?.currentSessionId()
+        activeSessionClient = null
+        activeAuthToken = null
+        activeSessionId = null
+
+        if (client == null || authToken == null || sessionId.isNullOrBlank()) {
+            Log.i(TAG, "No active Cloudmatch session to stop")
+            return
+        }
+
+        sessionTeardownScope.launch {
+            client.stopSession(authToken, sessionId)
+                .onSuccess { code ->
+                    Log.i(TAG, "Cloudmatch session $sessionId stopped (HTTP $code)")
+                }
+                .onFailure { ex ->
+                    Log.w(TAG, "Cloudmatch stop for session $sessionId failed: ${ex.message}")
+                }
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        signalingClient?.disconnect()
-        streamRenderer?.cleanUp()
-        peerConnectionWrapper?.dispose()
+        teardownConnection(
+            statusText = "Disconnected",
+            errorText = null,
+            recreate = false
+        )
     }
 
     @Composable
