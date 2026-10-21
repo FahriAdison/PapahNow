@@ -390,7 +390,7 @@ class MainActivity : ComponentActivity() {
                     .takeIf { it.isNotBlank() }
                     ?.let { "\n$it" }
                     .orEmpty()
-                errorMessage = "Signaling error: ${t.localizedMessage}$claimDetails"
+                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails"
                 connectionState = ConnectionState.DISCONNECTED
             }
         }

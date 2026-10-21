@@ -2,6 +2,7 @@ package com.papahchan.papahnow.webrtc
 
 import android.content.Context
 import android.util.Log
+import com.papahchan.papahnow.signaling.NvstSdpBuilder
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -222,7 +223,8 @@ class GfnPeerConnection(
             override fun onSetSuccess() {
                 super.onSetSuccess()
                 Log.i(TAG, "Local description set successfully. Sending answer to signaling!")
-                listener.onSendLocalAnswer(desc.description, cachedNvstSdp)
+                val clientNvstSdp = NvstSdpBuilder.build(cachedNvstSdp.orEmpty(), 1280, 720, 60, 15, desc.description)
+                listener.onSendLocalAnswer(desc.description, clientNvstSdp)
             }
 
             override fun onSetFailure(error: String?) {
