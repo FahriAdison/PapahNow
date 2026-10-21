@@ -327,7 +327,7 @@ class MainActivity : ComponentActivity() {
             )
 
             // Ensure PeerConnection is ready
-            peerConnectionWrapper?.createPeerConnection()
+            peerConnectionWrapper?.createPeerConnection(serverInfo.iceServers)
             CrashDiagnostics.setStage("PEER_CONNECTION_CREATED")
 
             signalingClient?.disconnect()
@@ -351,6 +351,13 @@ class MainActivity : ComponentActivity() {
             connectionState = ConnectionState.DISCONNECTED
         }
     }
+
+    /** ICE counters/states from the active PeerConnection, formatted for the error banner. */
+    private fun iceDiagnostics(): String =
+        peerConnectionWrapper?.iceDiagnosticSummary()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "\n$it" }
+            .orEmpty()
 
     private val signalingListener = object : GfnSignalingClient.Listener {
         override fun onSignalingConnected() {
@@ -390,7 +397,7 @@ class MainActivity : ComponentActivity() {
                     .takeIf { it.isNotBlank() }
                     ?.let { "\n$it" }
                     .orEmpty()
-                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails"
+                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails${iceDiagnostics()}"
                 connectionState = ConnectionState.DISCONNECTED
             }
         }
@@ -428,7 +435,7 @@ class MainActivity : ComponentActivity() {
                         connectionState = ConnectionState.CONNECTING
                     }
                 } else if (state == PeerConnection.IceConnectionState.FAILED) {
-                    errorMessage = "ICE connection failed"
+                    errorMessage = "ICE connection failed${iceDiagnostics()}"
                     connectionState = ConnectionState.DISCONNECTED
                 }
             }
@@ -441,7 +448,7 @@ class MainActivity : ComponentActivity() {
                 if (state == PeerConnection.PeerConnectionState.CONNECTED) {
                     connectionState = ConnectionState.STREAMING
                 } else if (state == PeerConnection.PeerConnectionState.FAILED) {
-                    errorMessage = "WebRTC PeerConnection failed"
+                    errorMessage = "WebRTC PeerConnection failed${iceDiagnostics()}"
                     connectionState = ConnectionState.DISCONNECTED
                 }
             }
@@ -450,7 +457,7 @@ class MainActivity : ComponentActivity() {
         override fun onError(description: String) {
             runOnUiThread {
                 Log.e(TAG, "PeerConnection error: $description")
-                errorMessage = description
+                errorMessage = description + iceDiagnostics()
                 connectionState = ConnectionState.DISCONNECTED
             }
         }

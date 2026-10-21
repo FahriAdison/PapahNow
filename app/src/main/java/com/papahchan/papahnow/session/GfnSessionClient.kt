@@ -2,14 +2,18 @@ package com.papahchan.papahnow.session
 
 import android.util.Log
 import com.papahchan.papahnow.diagnostics.CrashDiagnostics
+import com.papahchan.papahnow.signaling.IceServerConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -84,7 +88,9 @@ data class SignalingServerInfo(
     val resourcePath: String?,
     val sessionId: String,
     // Claim prefetch/PUT details, surfaced in the error banner if signaling fails.
-    val claimDiagnostics: String = ""
+    val claimDiagnostics: String = "",
+    // ICE servers published by the claim response (may be empty; caller falls back).
+    val iceServers: List<IceServerConfig> = emptyList()
 )
 
 class GfnSessionClient(
@@ -452,13 +458,14 @@ class GfnSessionClient(
     }
 
     /** Reads a JSON scalar as text, treating null/blank/non-scalar values as absent. */
-    private fun JsonObject.stringOrNull(key: String): String? {
-        val element = this[key] ?: return null
-        if (element is JsonNull) return null
+    private fun jsonStringOrNull(element: JsonElement?): String? {
+        if (element == null || element is JsonNull) return null
         return runCatching { element.jsonPrimitive.content }
             .getOrNull()
             ?.takeIf { it.isNotBlank() }
     }
+
+    private fun JsonObject.stringOrNull(key: String): String? = jsonStringOrNull(this[key])
 
     /** Parses the `session` object of a CloudMatch response without strict decoding. */
     private fun parseSessionJsonLenient(body: String): JsonObject? = runCatching {
@@ -498,6 +505,36 @@ class GfnSessionClient(
                 "(host=$resourceHost), sessionControlIp=$controlIp -> $chosen"
         )
         return chosen
+    }
+
+    /**
+     * Reads session.iceServerConfiguration.iceServers from raw claim JSON. Each
+     * entry's `urls` may be an array or a single string; username/credential are
+     * optional (TURN). Malformed entries are skipped instead of failing the flow.
+     */
+    private fun resolveIceServersLenient(sessionJson: JsonObject): List<IceServerConfig> {
+        val rawServers = sessionJson["iceServerConfiguration"]
+            ?.let { runCatching { it.jsonObject }.getOrNull() }
+            ?.get("iceServers")
+            ?.let { runCatching { it.jsonArray }.getOrNull() }
+            .orEmpty()
+        val configs = rawServers.mapNotNull { element ->
+            val entry = runCatching { element.jsonObject }.getOrNull()
+                ?: return@mapNotNull null
+            val urls = when (val urlsElement = entry["urls"]) {
+                is JsonArray -> urlsElement.mapNotNull { jsonStringOrNull(it) }
+                is JsonPrimitive -> listOfNotNull(jsonStringOrNull(urlsElement))
+                else -> emptyList()
+            }
+            if (urls.isEmpty()) return@mapNotNull null
+            IceServerConfig(
+                urls = urls,
+                username = entry.stringOrNull("username"),
+                credential = entry.stringOrNull("credential")
+            )
+        }
+        Log.i(TAG, "Claim iceServers: ${configs.size} configured")
+        return configs
     }
 
     private fun SessionData.effectiveQueuePosition(): Int? =
@@ -601,7 +638,9 @@ class GfnSessionClient(
         val prefetchHttpCode: Int? = null,
         val prefetchError: String? = null,
         // Host from the 2xx claim response's own connectionInfo (lenient parse).
-        val latestHost: String? = null
+        val latestHost: String? = null,
+        // ICE servers from the same 2xx claim response.
+        val iceServers: List<IceServerConfig> = emptyList()
     )
 
     /**
@@ -625,6 +664,7 @@ class GfnSessionClient(
         var prefetchHttpCode: Int? = null
         var prefetchError: String? = null
         var latestHost: String? = null
+        var iceServers: List<IceServerConfig> = emptyList()
 
         // Prefetch: same CloudMatch identity headers as polling. A failure here is
         // never fatal; the PUT still falls back to the original host.
@@ -679,8 +719,11 @@ class GfnSessionClient(
                     Log.i(TAG, "Session claim accepted: HTTP ${response.code}")
                     // The 2xx claim body carries the authoritative connectionInfo;
                     // the poll-derived session host can still point at the old server.
-                    latestHost = parseSessionJsonLenient(responseBody)
-                        ?.let { resolveHostLenient(it) }
+                    val claimSessionJson = parseSessionJsonLenient(responseBody)
+                    latestHost = claimSessionJson?.let { resolveHostLenient(it) }
+                    iceServers = claimSessionJson
+                        ?.let { resolveIceServersLenient(it) }
+                        .orEmpty()
                     Log.i(TAG, "Claim response latest host: $latestHost")
                 } else {
                     Log.w(TAG, "Session claim failed: HTTP ${response.code}: $responseBody")
@@ -694,7 +737,8 @@ class GfnSessionClient(
                     prefetchHost = host,
                     prefetchHttpCode = prefetchHttpCode,
                     prefetchError = prefetchError,
-                    latestHost = latestHost
+                    latestHost = latestHost,
+                    iceServers = iceServers
                 )
             }
         } catch (e: Exception) {
@@ -707,7 +751,8 @@ class GfnSessionClient(
                 prefetchHost = host,
                 prefetchHttpCode = prefetchHttpCode,
                 prefetchError = prefetchError,
-                latestHost = latestHost
+                latestHost = latestHost,
+                iceServers = iceServers
             )
         }
     }
@@ -1092,7 +1137,8 @@ class GfnSessionClient(
                     secure = secure,
                     resourcePath = signalingInfo.resourcePath,
                     sessionId = session.sessionId,
-                    claimDiagnostics = buildClaimDiagnostics(claimOutcome)
+                    claimDiagnostics = buildClaimDiagnostics(claimOutcome),
+                    iceServers = claimOutcome?.iceServers.orEmpty()
                 )
             )
         } catch (e: Exception) {

@@ -2,6 +2,7 @@ package com.papahchan.papahnow.webrtc
 
 import android.content.Context
 import android.util.Log
+import com.papahchan.papahnow.signaling.IceServerConfig
 import com.papahchan.papahnow.signaling.NvstSdpBuilder
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
@@ -35,12 +36,29 @@ class GfnPeerConnection(
     companion object {
         private const val TAG = "GfnPeerConnection"
         private var isFactoryInitialized = false
+
+        // Native-client fallback used when the session response publishes no ICE servers.
+        private val FALLBACK_ICE_SERVERS = listOf(
+            "stun:s1.stun.gamestream.nvidia.com:19308",
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302"
+        )
     }
 
     val eglBase: EglBase = EglBase.create()
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var cachedNvstSdp: String? = null
+
+    // ICE diagnostics: surfaced in the UI banner when signaling/ICE fails.
+    @Volatile
+    private var localIceCandidateCount = 0
+    @Volatile
+    private var remoteIceCandidateCount = 0
+    @Volatile
+    private var lastIceConnectionState: PeerConnection.IceConnectionState? = null
+    @Volatile
+    private var lastPeerConnectionState: PeerConnection.PeerConnectionState? = null
 
     init {
         initializeFactory()
@@ -66,16 +84,33 @@ class GfnPeerConnection(
         Log.i(TAG, "PeerConnectionFactory initialized with hardware decoder/encoder")
     }
 
-    fun createPeerConnection(customStunUrl: String? = null) {
-        val iceServers = mutableListOf<PeerConnection.IceServer>()
-        
-        // Priority STUN server from GFN docs
-        val gfnStun = customStunUrl ?: "stun:80.250.97.39:5004"
-        iceServers.add(PeerConnection.IceServer.builder(gfnStun).createIceServer())
-        // Standard fallback STUN
-        iceServers.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+    fun createPeerConnection(iceServers: List<IceServerConfig> = emptyList()) {
+        localIceCandidateCount = 0
+        remoteIceCandidateCount = 0
+        lastIceConnectionState = null
+        lastPeerConnectionState = null
 
-        val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
+        val rtcIceServers = if (iceServers.isEmpty()) {
+            FALLBACK_ICE_SERVERS.map { url ->
+                PeerConnection.IceServer.builder(url).createIceServer()
+            }
+        } else {
+            iceServers.map { config ->
+                PeerConnection.IceServer.builder(config.urls)
+                    .apply {
+                        config.username?.let { setUsername(it) }
+                        config.credential?.let { setPassword(it) }
+                    }
+                    .createIceServer()
+            }
+        }
+        Log.i(
+            TAG,
+            "ICE servers: ${rtcIceServers.size} " +
+                (if (iceServers.isEmpty()) "(fallback STUN)" else "(from session)")
+        )
+
+        val rtcConfig = PeerConnection.RTCConfiguration(rtcIceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
             rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
@@ -88,15 +123,18 @@ class GfnPeerConnection(
             }
 
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
+                lastIceConnectionState = state
                 Log.i(TAG, "onIceConnectionChange: $state")
                 listener.onIceConnectionStateChange(state)
             }
 
             override fun onStandardizedIceConnectionChange(newState: PeerConnection.IceConnectionState) {
+                lastIceConnectionState = newState
                 Log.d(TAG, "onStandardizedIceConnectionChange: $newState")
             }
 
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
+                lastPeerConnectionState = newState
                 Log.i(TAG, "onConnectionChange: $newState")
                 listener.onConnectionStateChange(newState)
             }
@@ -110,6 +148,11 @@ class GfnPeerConnection(
             }
 
             override fun onIceCandidate(candidate: IceCandidate) {
+                if (candidate.sdp.contains(" tcp ", ignoreCase = true)) {
+                    Log.i(TAG, "Skipping TCP ICE candidate: ${candidate.sdpMid}[${candidate.sdpMLineIndex}]")
+                    return
+                }
+                localIceCandidateCount++
                 Log.i(TAG, "Local ICE candidate discovered: ${candidate.sdpMid}[${candidate.sdpMLineIndex}] => ${candidate.sdp}")
                 listener.onSendLocalIceCandidate(
                     candidate.sdpMid ?: "",
@@ -235,10 +278,18 @@ class GfnPeerConnection(
     }
 
     fun addRemoteIceCandidate(sdpMid: String, sdpMLineIndex: Int, candidate: String) {
+        remoteIceCandidateCount++
         val iceCandidate = IceCandidate(sdpMid, sdpMLineIndex, candidate)
         peerConnection?.addIceCandidate(iceCandidate)
         Log.d(TAG, "Added remote ICE candidate: $sdpMid[$sdpMLineIndex]")
     }
+
+    /** Counts and last known states for the error banner. */
+    fun iceDiagnosticSummary(): String =
+        "ICE diagnostics: localCandidatesSent=$localIceCandidateCount, " +
+            "remoteCandidatesReceived=$remoteIceCandidateCount, " +
+            "lastIceState=${lastIceConnectionState?.name ?: "n/a"}, " +
+            "lastPeerConnectionState=${lastPeerConnectionState?.name ?: "n/a"}"
 
     fun dispose() {
         Log.i(TAG, "Disposing PeerConnection resources...")
