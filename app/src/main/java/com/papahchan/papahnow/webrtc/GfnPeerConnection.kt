@@ -50,6 +50,12 @@ class GfnPeerConnection(
     private var peerConnection: PeerConnection? = null
     private var cachedNvstSdp: String? = null
 
+    // Input/stats channels negotiated before the remote offer, matching the native
+    // client. Kept as fields so a repeated offer never creates duplicates.
+    private var inputChannelV1: DataChannel? = null
+    private var partialChannel: DataChannel? = null
+    private var statsChannel: DataChannel? = null
+
     // ICE diagnostics: surfaced in the UI banner when signaling/ICE fails.
     @Volatile
     private var localIceCandidateCount = 0
@@ -89,6 +95,9 @@ class GfnPeerConnection(
         remoteIceCandidateCount = 0
         lastIceConnectionState = null
         lastPeerConnectionState = null
+        inputChannelV1 = null
+        partialChannel = null
+        statsChannel = null
 
         val rtcIceServers = if (iceServers.isEmpty()) {
             FALLBACK_ICE_SERVERS.map { url ->
@@ -219,11 +228,57 @@ class GfnPeerConnection(
     }
 
     /**
+     * Creates the three native input/stats data channels before the remote offer is
+     * applied, so the SDP answer carries the required m=application section. Existing
+     * channels are reused.
+     */
+    private fun ensureInputDataChannels() {
+        val pc = peerConnection ?: return
+
+        if (inputChannelV1 == null) {
+            inputChannelV1 = pc.createDataChannel(
+                "input_channel_v1",
+                DataChannel.Init().apply { ordered = true }
+            )
+            Log.i(TAG, "Created data channel input_channel_v1")
+        }
+
+        if (partialChannel == null) {
+            val threshold = Regex("a=ri\\.partialReliableThresholdMs:(\\d+)")
+                .find(cachedNvstSdp.orEmpty())
+                ?.groupValues?.getOrNull(1)
+                ?.toIntOrNull() ?: 30
+            partialChannel = pc.createDataChannel(
+                "input_channel_partially_reliable",
+                DataChannel.Init().apply {
+                    ordered = false
+                    maxRetransmitTimeMs = threshold
+                }
+            )
+            Log.i(TAG, "Created data channel input_channel_partially_reliable (threshold=${threshold}ms)")
+        }
+
+        if (statsChannel == null) {
+            statsChannel = pc.createDataChannel(
+                "stats_channel",
+                DataChannel.Init().apply {
+                    ordered = false
+                    maxRetransmits = 0
+                }
+            )
+            Log.i(TAG, "Created data channel stats_channel")
+        }
+    }
+
+    /**
      * Set the remote SDP offer as received from GFN.
      * CRITICAL: Do NOT modify or filter the SDP string; keep all attributes untouched.
      */
     fun handleRemoteOffer(sdp: String, nvstSdp: String?) {
         cachedNvstSdp = nvstSdp
+        // Must happen before setRemoteDescription: the answer's m=application is
+        // negotiated from these locally-created channels.
+        ensureInputDataChannels()
         Log.i(TAG, "Setting remote SDP offer (length=${sdp.length})")
         val sessionDescription = SessionDescription(SessionDescription.Type.OFFER, sdp)
 
