@@ -1,6 +1,13 @@
 package com.papahchan.papahnow.signaling
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -36,6 +43,10 @@ class GfnSignalingClient(
         private const val SIGNALING_ORIGIN = "https://play.geforcenow.com"
         private const val SIGNALING_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
+
+        // Proactive client liveness: the native client sends this every 5s.
+        private const val HEARTBEAT_INTERVAL_MS = 5_000L
+        private const val HEARTBEAT_MESSAGE = "{\"hb\":1}"
     }
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -45,6 +56,8 @@ class GfnSignalingClient(
         .build()
 
     private var webSocket: WebSocket? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var heartbeatJob: Job? = null
     private val ackSequence = AtomicInteger(1)
     private var clientId: Int = 2 // default client peer id is 2, updated by peer_info
     private var serverPeerId: Int = 1 // default server peer id is 1
@@ -81,6 +94,7 @@ class GfnSignalingClient(
         webSocket = okHttpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket connected successfully (HTTP ${response.code})")
+                startHeartbeat()
                 listener.onSignalingConnected()
             }
 
@@ -145,14 +159,32 @@ class GfnSignalingClient(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "Signaling closed: code=$code, reason=$reason")
+                stopHeartbeat()
                 listener.onSignalingClosed(code, reason)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "Signaling WebSocket failure: ${t.message}, response code: ${response?.code}", t)
+                stopHeartbeat()
                 listener.onSignalingError(t)
             }
         })
+    }
+
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                val sent = webSocket?.send(HEARTBEAT_MESSAGE) == true
+                Log.d(TAG, "Heartbeat sent: $HEARTBEAT_MESSAGE (accepted=$sent)")
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
     }
 
     private fun sendAck(ackId: Int) {
@@ -204,6 +236,7 @@ class GfnSignalingClient(
 
     fun disconnect() {
         Log.i(TAG, "Disconnecting signaling client...")
+        stopHeartbeat()
         try {
             webSocket?.close(1000, "Normal closure")
             webSocket = null
