@@ -47,6 +47,10 @@ class GfnSignalingClient(
         // Proactive client liveness: the native client sends this every 5s.
         private const val HEARTBEAT_INTERVAL_MS = 5_000L
         private const val HEARTBEAT_MESSAGE = "{\"hb\":1}"
+
+        // Raw RX ring buffer for the on-screen signaling error banner.
+        private const val MAX_RX_MESSAGES = 8
+        private const val MAX_RX_MESSAGE_CHARS = 150
     }
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -58,6 +62,9 @@ class GfnSignalingClient(
     private var webSocket: WebSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var heartbeatJob: Job? = null
+    private val recentRx = ArrayDeque<String>()
+    @Volatile
+    private var lastAnswerSummary: String = ""
     private val ackSequence = AtomicInteger(1)
     private var clientId: Int = 2 // default client peer id is 2, updated by peer_info
     private var serverPeerId: Int = 1 // default server peer id is 1
@@ -99,6 +106,7 @@ class GfnSignalingClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                recordRecentRx(text)
                 Log.d(TAG, "Signaling RECV: $text")
                 try {
                     val envelope = jsonConfig.decodeFromString<SignalingEnvelope>(text)
@@ -187,6 +195,24 @@ class GfnSignalingClient(
         heartbeatJob = null
     }
 
+    /** Stores a truncated raw RX message, keeping only the newest eight. */
+    private fun recordRecentRx(message: String) {
+        synchronized(recentRx) {
+            if (recentRx.size >= MAX_RX_MESSAGES) {
+                recentRx.removeFirst()
+            }
+            recentRx.addLast(message.take(MAX_RX_MESSAGE_CHARS))
+        }
+    }
+
+    /** Raw RX messages for the signaling error banner, oldest to newest. */
+    fun recentRxSummary(): String = synchronized(recentRx) {
+        recentRx.joinToString(" | ")
+    }
+
+    /** Summary of the most recent answer transmitted. */
+    fun lastTxAnswerSummary(): String = lastAnswerSummary
+
     private fun sendAck(ackId: Int) {
         val ackJson = jsonConfig.encodeToString(ClientAck(ack = ackId))
         Log.d(TAG, "Signaling SEND ACK: $ackJson")
@@ -211,6 +237,9 @@ class GfnSignalingClient(
         val json = jsonConfig.encodeToString(wrapper)
         Log.i(TAG, "Signaling SEND ANSWER to peer $targetPeerId (SDP length: ${sdp.length})")
         Log.d(TAG, "Signaling ANSWER raw: $json")
+        lastAnswerSummary =
+            "type=answer sdpLen=${sdp.length} nvstSdpLen=${nvstSdp?.length ?: 0} " +
+                "from=$clientId to=$targetPeerId"
         webSocket?.send(json)
     }
 

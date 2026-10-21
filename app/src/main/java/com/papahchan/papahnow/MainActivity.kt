@@ -359,6 +359,12 @@ class MainActivity : ComponentActivity() {
             ?.let { "\n$it" }
             .orEmpty()
 
+    /** Raw signaling RX/TX details for the signaling error banner. */
+    private fun signalingIoDetails(): String {
+        val client = signalingClient ?: return ""
+        return "\nRX: ${client.recentRxSummary()}\nTX answer: ${client.lastTxAnswerSummary()}"
+    }
+
     private val signalingListener = object : GfnSignalingClient.Listener {
         override fun onSignalingConnected() {
             runOnUiThread {
@@ -397,7 +403,7 @@ class MainActivity : ComponentActivity() {
                     .takeIf { it.isNotBlank() }
                     ?.let { "\n$it" }
                     .orEmpty()
-                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails${iceDiagnostics()}"
+                errorMessage = "Signaling error: ${t.javaClass.simpleName}: ${t.localizedMessage}$claimDetails${signalingIoDetails()}${iceDiagnostics()}"
                 connectionState = ConnectionState.DISCONNECTED
             }
         }
