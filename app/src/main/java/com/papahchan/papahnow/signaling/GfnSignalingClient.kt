@@ -1,21 +1,21 @@
 package com.papahchan.papahnow.signaling
 
 import android.util.Log
+import com.papahchan.papahnow.network.GfnHttpClients
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -54,11 +54,9 @@ class GfnSignalingClient(
         private const val MAX_RX_MESSAGE_CHARS = 150
     }
 
-    private val okHttpClient = OkHttpClient.Builder()
-        .pingInterval(10, TimeUnit.SECONDS)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // infinite for websocket
-        .build()
+    // Shared process-wide client: only the WS-specific timeouts differ, while
+    // the dispatcher and connection pool are reused across Connect cycles.
+    private val okHttpClient = GfnHttpClients.signaling
 
     private var webSocket: WebSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -107,6 +105,11 @@ class GfnSignalingClient(
         webSocket = okHttpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket connected successfully (HTTP ${response.code})")
+                if (manualDisconnect.get()) {
+                    Log.i(TAG, "Ignoring onOpen after local disconnect")
+                    webSocket.close(1000, "Normal closure")
+                    return
+                }
                 sendPeerInfo(webSocket)
                 startHeartbeat()
                 listener.onSignalingConnected()
@@ -303,6 +306,9 @@ class GfnSignalingClient(
         // Suppress listener callbacks: the Activity is already tearing down.
         manualDisconnect.set(true)
         stopHeartbeat()
+        // This scope is owned by the client instance; cancel it so no heartbeat
+        // or other coroutine survives a Connect/Disconnect cycle.
+        scope.cancel()
         try {
             webSocket?.close(1000, "Normal closure")
             webSocket = null

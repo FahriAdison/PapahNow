@@ -21,18 +21,42 @@
 | Server bundle port | 47999 |
 | Client bundle port | 49006 |
 
-## Alur Signaling (dari WS Messages)
+## Alur Signaling (implementasi klien saat ini)
+
+Handshake:
 
 ```
-Client → {"ack":1}
-Server → {"ackId":2, "peer_msg":{"from":1, "msg":{"type":"offer","sdp":"...","nvstSdp":"..."}, "to":2}}
-Client → {"ack":2}
-Client → {"peer_msg":{"from":2,"to":1,"msg":{"type":"answer","sdp":"..."}}}
-Server → {"peer_msg":{"from":2,"to":1,"msg":{"sdpMLineIndex":0,"sdpMid":"...","candidate":"..."}}} (×5 ICE candidates)
-...ack...
-Server → {"hb":1} (heartbeat)
-Connection Closed: 4001 (signaling selesai)
+wss://<host>:443/nvst/sign_in?peer_id=peer-<12hex>&version=2&peer_role=1&pairing_id=<sessionId>
+Header: Host: <host>
+Header: Origin: https://play.geforcenow.com
+Header: Sec-WebSocket-Protocol: x-nv-sessionid.<sessionId>
 ```
+
+Urutan pesan:
+
+```
+Client → {"ackid":1,"peer_info":{"browser":"Chrome","browserVersion":"131","connected":true,"id":0,"name":"peer-<12hex>","peerRole":0,"resolution":"1280x720","version":2}}
+Server → {"peer_info":{"id":1,"name":"<server>","..."}}
+Server → {"ackId":2,"peer_msg":{"from":1,"to":2,"msg":{"type":"offer","sdp":"...","nvstSdp":"..."}}}
+Client → {"ack":2}
+Client → {"peer_msg":{"from":2,"to":1,"msg":"{\"type\":\"answer\",\"sdp\":\"...\",\"nvstSdp\":\"...\"}"},"ackid":3}
+Client → {"peer_msg":{"from":2,"to":1,"msg":"{\"sdpMLineIndex\":1,\"sdpMid\":\"1\",\"candidate\":\"candidate:...\"}"},"ackid":4} (trickle)
+Server → {"peer_msg":{"from":1,"to":2,"msg":"{\"sdpMLineIndex\":1,\"sdpMid\":\"1\",\"candidate\":\"candidate:...\"}"}}          (trickle)
+Client → {"hb":1}                                            (setiap 5 detik)
+Server → {"hb":1}                                            (heartbeat server)
+Connection Closed: 4001                                      (sesi signaling selesai)
+```
+
+Catatan implementasi:
+
+1. **`peer_info` klien wajib** dikirim segera setelah `onOpen`, sebelum menunggu offer. Ini bukan opsional: tanpa peer announcement server tidak tahu nama/route peer klien.
+2. Klien mulai dengan `id = 0`; id final hanya diadopsi dari `peer_info` yang `name == peerName` milik klien. `peer_info` server (biasanya id 1) diabaikan.
+3. Target `answer`/ICE adalah `peer_msg.from` terakhir dari server (default 1).
+4. **Answer wajib menyertakan `nvstSdp`** yang dibangun dari answer lokal (ICE ufrag/pwd + DTLS fingerprint lokal). Jangan echo `nvstSdp` server.
+5. Setiap pesan masuk dengan `ackId`/`ackid` dibalas `{"ack":<id>}`.
+6. Heartbeat klien `{"hb":1}` setiap 5 detik adalah syarat liveness; jangan dihapus.
+7. Kandidat ICE remote dapat tiba sebelum `setRemoteDescription` selesai: buffer sampai sukses, lalu flush. Kandidat lokal ditahan sampai answer terkirim.
+8. Close `4001` berarti sesi signaling selesai normal; UI harus berpindah ke `DISCONNECTED` dan resource dibersihkan.
 
 ## SDP Offer (WebRTC standar)
 
@@ -196,7 +220,7 @@ runtime.srtpReplayWindowSize:1024
 ## Catatan untuk Implementasi Client
 
 1. **SDP standar** — libwebrtc bisa parse langsung
-2. **nvstSdp** — sebagian besar adalah tuning; client minimal bisa kirim answer tanpa memodifikasi semua param
+2. **nvstSdp** — wajib dikirim di answer. Gunakan `NvstSdpBuilder` agar berisi ICE ufrag/pwd dan DTLS fingerprint dari answer lokal, bukan nilai milik server.
 3. **DataChannel** — buka SCTP ke port 5000 untuk kirim input
 4. **ICE** — server pakai ice-lite, jadi client yang aktif kirim STUN binding
 5. **DTLS** — verifikasi fingerprint SHA-256 dari offer

@@ -2,6 +2,7 @@ package com.papahchan.papahnow.session
 
 import android.util.Log
 import com.papahchan.papahnow.diagnostics.CrashDiagnostics
+import com.papahchan.papahnow.network.GfnHttpClients
 import com.papahchan.papahnow.signaling.IceServerConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -24,14 +25,12 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 import java.util.TimeZone
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 @Serializable
 data class SessionResponse(
@@ -170,10 +169,8 @@ class GfnSessionClient(
         private const val REFERER = "https://play.geforcenow.com/" // Referer
     }
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+    // Shared process-wide client: no per-Connect dispatcher/connection-pool leak.
+    private val httpClient = GfnHttpClients.session
 
     // Identity of the create/claim/poll flow, reused by the stop request.
     @Volatile
