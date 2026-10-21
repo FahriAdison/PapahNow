@@ -62,6 +62,14 @@ class GfnPeerConnection(
     @Volatile
     private var remoteIceCandidateCount = 0
     @Volatile
+    private var localHostCandidateCount = 0
+    @Volatile
+    private var localSrflxCandidateCount = 0
+    @Volatile
+    private var localRelayCandidateCount = 0
+    @Volatile
+    private var usedIceServerUrls: List<String> = emptyList()
+    @Volatile
     private var lastIceConnectionState: PeerConnection.IceConnectionState? = null
     @Volatile
     private var lastPeerConnectionState: PeerConnection.PeerConnectionState? = null
@@ -93,30 +101,45 @@ class GfnPeerConnection(
     fun createPeerConnection(iceServers: List<IceServerConfig> = emptyList()) {
         localIceCandidateCount = 0
         remoteIceCandidateCount = 0
+        localHostCandidateCount = 0
+        localSrflxCandidateCount = 0
+        localRelayCandidateCount = 0
+        usedIceServerUrls = emptyList()
         lastIceConnectionState = null
         lastPeerConnectionState = null
         inputChannelV1 = null
         partialChannel = null
         statsChannel = null
 
-        val rtcIceServers = if (iceServers.isEmpty()) {
-            FALLBACK_ICE_SERVERS.map { url ->
-                PeerConnection.IceServer.builder(url).createIceServer()
-            }
-        } else {
-            iceServers.map { config ->
-                PeerConnection.IceServer.builder(config.urls)
-                    .apply {
-                        config.username?.let { setUsername(it) }
-                        config.credential?.let { setPassword(it) }
-                    }
-                    .createIceServer()
+        // Always merge session ICE servers with the known-good STUN fallbacks and
+        // deduplicate per URL. A TURN-only session config must not suppress STUN:
+        // without srflx/relay the remote side never receives a reachable candidate.
+        val usedUrls = linkedSetOf<String>()
+        val rtcIceServers = mutableListOf<PeerConnection.IceServer>()
+
+        iceServers.forEach { config ->
+            val uniqueUrls = config.urls.filter { usedUrls.add(it) }
+            if (uniqueUrls.isNotEmpty()) {
+                rtcIceServers.add(
+                    PeerConnection.IceServer.builder(uniqueUrls)
+                        .apply {
+                            config.username?.let { setUsername(it) }
+                            config.credential?.let { setPassword(it) }
+                        }
+                        .createIceServer()
+                )
             }
         }
+        FALLBACK_ICE_SERVERS.forEach { url ->
+            if (usedUrls.add(url)) {
+                rtcIceServers.add(PeerConnection.IceServer.builder(url).createIceServer())
+            }
+        }
+        usedIceServerUrls = usedUrls.toList()
         Log.i(
             TAG,
-            "ICE servers: ${rtcIceServers.size} " +
-                (if (iceServers.isEmpty()) "(fallback STUN)" else "(from session)")
+            "ICE servers: ${rtcIceServers.size} configured, " +
+                "${usedIceServerUrls.size} unique URLs"
         )
 
         val rtcConfig = PeerConnection.RTCConfiguration(rtcIceServers).apply {
@@ -162,6 +185,14 @@ class GfnPeerConnection(
                     return
                 }
                 localIceCandidateCount++
+                when {
+                    candidate.sdp.contains("typ host", ignoreCase = true) ->
+                        localHostCandidateCount++
+                    candidate.sdp.contains("typ srflx", ignoreCase = true) ->
+                        localSrflxCandidateCount++
+                    candidate.sdp.contains("typ relay", ignoreCase = true) ->
+                        localRelayCandidateCount++
+                }
                 Log.i(TAG, "Local ICE candidate discovered: ${candidate.sdpMid}[${candidate.sdpMLineIndex}] => ${candidate.sdp}")
                 listener.onSendLocalIceCandidate(
                     candidate.sdpMid ?: "",
@@ -339,12 +370,16 @@ class GfnPeerConnection(
         Log.d(TAG, "Added remote ICE candidate: $sdpMid[$sdpMLineIndex]")
     }
 
-    /** Counts and last known states for the error banner. */
-    fun iceDiagnosticSummary(): String =
-        "ICE diagnostics: localCandidatesSent=$localIceCandidateCount, " +
+    /** Counts, candidate types, active ICE URLs, and last known states for the banner. */
+    fun iceDiagnosticSummary(): String {
+        val iceUrls = usedIceServerUrls.joinToString(", ").ifEmpty { "n/a" }
+        return "ICE diagnostics: localCandidatesSent=$localIceCandidateCount, " +
             "remoteCandidatesReceived=$remoteIceCandidateCount, " +
+            "localByType=host:$localHostCandidateCount/srflx:$localSrflxCandidateCount/relay:$localRelayCandidateCount, " +
+            "iceServers=$iceUrls, " +
             "lastIceState=${lastIceConnectionState?.name ?: "n/a"}, " +
             "lastPeerConnectionState=${lastPeerConnectionState?.name ?: "n/a"}"
+    }
 
     fun dispose() {
         Log.i(TAG, "Disposing PeerConnection resources...")
