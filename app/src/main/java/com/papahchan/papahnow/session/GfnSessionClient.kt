@@ -6,6 +6,7 @@ import com.papahchan.papahnow.network.GfnHttpClients
 import com.papahchan.papahnow.signaling.IceServerConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -954,6 +955,35 @@ class GfnSessionClient(
         fps: Int = 60,
         // Called on the polling thread with the current queue/claim status text.
         onProgress: (String) -> Unit = {}
+    ): Result<SignalingServerInfo> =
+        try {
+            createStreamingSessionInternal(authToken, appId, width, height, fps, onProgress)
+        } catch (e: CancellationException) {
+            // M4: the create POST and the polls block on OkHttp, so a Disconnect
+            // while POST is in flight cancels this coroutine only after Cloudmatch
+            // may have allocated a session. MainActivity's stopActiveSession()
+            // already ran while allocatedSessionId was still null, so nobody else
+            // will release this allocation: do it here before rethrowing.
+            allocatedSessionId?.let { sessionId ->
+                // The cleanup must run even though this coroutine is cancelled.
+                withContext(NonCancellable) {
+                    runCatching { stopSession(authToken, sessionId) }
+                        .onFailure {
+                            Log.w(TAG, "Session stop after cancellation failed for $sessionId", it)
+                        }
+                }
+            }
+            throw e
+        }
+
+    /** Body of [createStreamingSession]; cancellation cleanup lives in the caller. */
+    private suspend fun createStreamingSessionInternal(
+        authToken: String,
+        appId: Int,
+        width: Int,
+        height: Int,
+        fps: Int,
+        onProgress: (String) -> Unit
     ): Result<SignalingServerInfo> = withContext(Dispatchers.IO) {
         // NanaPlay GfnApi.kt createSession: a fresh random nv-client-id per
         // invocation, shared by create + claim + poll within this Connect flow.
