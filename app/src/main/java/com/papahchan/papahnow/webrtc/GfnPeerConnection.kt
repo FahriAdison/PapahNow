@@ -31,6 +31,7 @@ class GfnPeerConnection(
         fun onIceConnectionStateChange(state: PeerConnection.IceConnectionState)
         fun onConnectionStateChange(state: PeerConnection.PeerConnectionState)
         fun onError(description: String)
+        fun onDataChannelStateChange(label: String, id: Int, state: DataChannel.State)
     }
 
     companion object {
@@ -50,11 +51,27 @@ class GfnPeerConnection(
     private var peerConnection: PeerConnection? = null
     private var cachedNvstSdp: String? = null
 
-    // Input/stats channels negotiated before the remote offer, matching the native
-    // client. Kept as fields so a repeated offer never creates duplicates.
-    private var inputChannelV1: DataChannel? = null
-    private var partialChannel: DataChannel? = null
-    private var statsChannel: DataChannel? = null
+    // Input/stats/control channels negotiated before or during connection.
+    // Exposed as properties with public read access so callers can check state.
+    @Volatile
+    var inputChannelV1: DataChannel? = null
+        private set
+
+    @Volatile
+    var partialChannel: DataChannel? = null
+        private set
+
+    @Volatile
+    var cursorChannel: DataChannel? = null
+        private set
+
+    @Volatile
+    var statsChannel: DataChannel? = null
+        private set
+
+    @Volatile
+    var controlChannel: DataChannel? = null
+        private set
 
     // ICE diagnostics: surfaced in the UI banner when signaling/ICE fails.
     @Volatile
@@ -121,9 +138,7 @@ class GfnPeerConnection(
         usedIceServerUrls = emptyList()
         lastIceConnectionState = null
         lastPeerConnectionState = null
-        inputChannelV1 = null
-        partialChannel = null
-        statsChannel = null
+        closeDataChannels()
         synchronized(iceLock) {
             pendingRemoteIceCandidates.clear()
             pendingLocalIceCandidates.clear()
@@ -257,7 +272,13 @@ class GfnPeerConnection(
             }
 
             override fun onDataChannel(dataChannel: DataChannel) {
-                Log.i(TAG, "onDataChannel: label=${dataChannel.label()}, id=${dataChannel.id()}")
+                val label = dataChannel.label()
+                val id = dataChannel.id()
+                Log.i(TAG, "Server created DataChannel: label=$label, id=$id, state=${dataChannel.state()}")
+                if (label == "control_channel") {
+                    controlChannel = dataChannel
+                }
+                setupDataChannel(dataChannel)
             }
 
             override fun onRenegotiationNeeded() {
@@ -302,8 +323,66 @@ class GfnPeerConnection(
         return created
     }
 
+    private fun setupDataChannel(channel: DataChannel) {
+        val label = channel.label()
+        val id = channel.id()
+        Log.i(TAG, "Registering observer for DataChannel '$label' (id=$id), initial state=${channel.state()}")
+
+        channel.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) {
+                Log.d(TAG, "DataChannel '$label' (id=$id) bufferedAmount=$previousAmount")
+            }
+
+            override fun onStateChange() {
+                val state = channel.state()
+                Log.i(TAG, "DataChannel '$label' (id=$id) onStateChange -> $state")
+                listener.onDataChannelStateChange(label, id, state)
+            }
+
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                Log.d(TAG, "DataChannel '$label' (id=$id) onMessage: ${buffer.data.remaining()} bytes")
+            }
+        })
+
+        if (channel.state() == DataChannel.State.OPEN) {
+            listener.onDataChannelStateChange(label, id, DataChannel.State.OPEN)
+        }
+    }
+
+    private fun closeDataChannels() {
+        try {
+            partialChannel?.unregisterObserver()
+            partialChannel?.close()
+        } catch (_: Exception) {}
+        partialChannel = null
+
+        try {
+            controlChannel?.unregisterObserver()
+            controlChannel?.close()
+        } catch (_: Exception) {}
+        controlChannel = null
+
+        try {
+            inputChannelV1?.unregisterObserver()
+            inputChannelV1?.close()
+        } catch (_: Exception) {}
+        inputChannelV1 = null
+
+        try {
+            cursorChannel?.unregisterObserver()
+            cursorChannel?.close()
+        } catch (_: Exception) {}
+        cursorChannel = null
+
+        try {
+            statsChannel?.unregisterObserver()
+            statsChannel?.close()
+        } catch (_: Exception) {}
+        statsChannel = null
+    }
+
     /**
-     * Creates the three native input/stats data channels before the remote offer is
+     * Creates the native input/stats/cursor data channels before the remote offer is
      * applied, so the SDP answer carries the required m=application section. Existing
      * channels are reused.
      */
@@ -314,8 +393,8 @@ class GfnPeerConnection(
             inputChannelV1 = pc.createDataChannel(
                 "input_channel_v1",
                 DataChannel.Init().apply { ordered = true }
-            )
-            Log.i(TAG, "Created data channel input_channel_v1")
+            )?.also { setupDataChannel(it) }
+            Log.i(TAG, "Created data channel input_channel_v1 (id=${inputChannelV1?.id()})")
         }
 
         if (partialChannel == null) {
@@ -329,8 +408,16 @@ class GfnPeerConnection(
                     ordered = false
                     maxRetransmitTimeMs = threshold
                 }
-            )
-            Log.i(TAG, "Created data channel input_channel_partially_reliable (threshold=${threshold}ms)")
+            )?.also { setupDataChannel(it) }
+            Log.i(TAG, "Created data channel input_channel_partially_reliable (id=${partialChannel?.id()}, threshold=${threshold}ms)")
+        }
+
+        if (cursorChannel == null) {
+            cursorChannel = pc.createDataChannel(
+                "cursor_channel",
+                DataChannel.Init().apply { ordered = true }
+            )?.also { setupDataChannel(it) }
+            Log.i(TAG, "Created data channel cursor_channel (id=${cursorChannel?.id()})")
         }
 
         if (statsChannel == null) {
@@ -340,8 +427,8 @@ class GfnPeerConnection(
                     ordered = false
                     maxRetransmits = 0
                 }
-            )
-            Log.i(TAG, "Created data channel stats_channel")
+            )?.also { setupDataChannel(it) }
+            Log.i(TAG, "Created data channel stats_channel (id=${statsChannel?.id()})")
         }
     }
 
@@ -506,6 +593,49 @@ class GfnPeerConnection(
             "lastPeerConnectionState=${lastPeerConnectionState?.name ?: "n/a"}"
     }
 
+    fun isGamepadChannelOpen(): Boolean =
+        partialChannel?.state() == DataChannel.State.OPEN
+
+    fun isControlChannelOpen(): Boolean =
+        controlChannel?.state() == DataChannel.State.OPEN
+
+    fun sendGamepadPacket(packet: ByteArray): Boolean {
+        val channel = partialChannel ?: run {
+            Log.w(TAG, "Cannot send gamepad packet: partialChannel is null")
+            return false
+        }
+        val state = channel.state()
+        if (state != DataChannel.State.OPEN) {
+            Log.w(TAG, "Cannot send gamepad packet: partialChannel state is $state (expected OPEN)")
+            return false
+        }
+        return try {
+            val buffer = DataChannel.Buffer(java.nio.ByteBuffer.wrap(packet), true)
+            val sent = channel.send(buffer)
+            if (!sent) {
+                Log.w(TAG, "partialChannel.send returned false")
+            }
+            sent
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception sending gamepad packet to DataChannel", e)
+            false
+        }
+    }
+
+    fun dataChannelDiagnostics(): String {
+        val partial = partialChannel
+        val control = controlChannel
+        val v1 = inputChannelV1
+        val cursor = cursorChannel
+        val stats = statsChannel
+        return "DataChannels: " +
+            "gamepad[id=${partial?.id() ?: -1}, label=${partial?.label() ?: "n/a"}]=${partial?.state() ?: "null"}, " +
+            "control[id=${control?.id() ?: -1}, label=${control?.label() ?: "n/a"}]=${control?.state() ?: "null"}, " +
+            "v1[id=${v1?.id() ?: -1}]=${v1?.state() ?: "null"}, " +
+            "cursor[id=${cursor?.id() ?: -1}]=${cursor?.state() ?: "null"}, " +
+            "stats[id=${stats?.id() ?: -1}]=${stats?.state() ?: "null"}"
+    }
+
     fun dispose() {
         Log.i(TAG, "Disposing PeerConnection resources...")
         synchronized(iceLock) {
@@ -514,6 +644,7 @@ class GfnPeerConnection(
             remoteDescriptionSet = false
             answerSent = false
         }
+        closeDataChannels()
         try {
             peerConnection?.close()
             peerConnection?.dispose()

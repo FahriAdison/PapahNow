@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
@@ -48,6 +50,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.papahchan.papahnow.auth.GfnAuthManager
 import com.papahchan.papahnow.diagnostics.CrashDiagnostics
+import com.papahchan.papahnow.input.GfnGamepadController
 import com.papahchan.papahnow.session.GfnSessionClient
 import com.papahchan.papahnow.session.SignalingServerInfo
 import com.papahchan.papahnow.signaling.GfnSignalingClient
@@ -59,6 +62,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.webrtc.DataChannel
 import org.webrtc.PeerConnection
 import org.webrtc.RendererCommon
 import org.webrtc.VideoTrack
@@ -130,6 +134,15 @@ class MainActivity : ComponentActivity() {
     private var activeAuthToken: String? = null
     private var activeSessionId: String? = null
 
+    // Gamepad controller & state
+    private var gamepadController: GfnGamepadController? = null
+    private var isGamepadChannelOpen by mutableStateOf(false)
+    private var isControlChannelOpen by mutableStateOf(false)
+    private var gamepadChannelId by mutableStateOf(-1)
+    private var controlChannelId by mutableStateOf(-1)
+    private var gamepadPacketsSent by mutableStateOf(0)
+    private var gamepadDebugStatus by mutableStateOf("")
+
     // Compose observable state
     private var connectionState by mutableStateOf(ConnectionState.DISCONNECTED)
     private var statusDetail by mutableStateOf("")
@@ -178,6 +191,7 @@ class MainActivity : ComponentActivity() {
 
         // Initialize PeerConnection and StreamRenderer
         peerConnectionWrapper = GfnPeerConnection(this, peerConnectionListener)
+        gamepadController = GfnGamepadController { peerConnectionWrapper }
         streamRenderer = StreamRenderer(this).apply {
             peerConnectionWrapper?.let { pc ->
                 initRenderer(pc.eglBase.eglBaseContext, rendererEvents)
@@ -532,6 +546,19 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        override fun onDataChannelStateChange(label: String, id: Int, state: DataChannel.State) {
+            runOnUiThread {
+                Log.i(TAG, "DataChannel state change: $label[id=$id] -> $state")
+                if (label == "input_channel_partially_reliable") {
+                    isGamepadChannelOpen = (state == DataChannel.State.OPEN)
+                    gamepadChannelId = id
+                } else if (label == "control_channel") {
+                    isControlChannelOpen = (state == DataChannel.State.OPEN)
+                    controlChannelId = id
+                }
+            }
+        }
+
         override fun onVideoTrackReceived(videoTrack: VideoTrack) {
             runOnUiThread {
                 Log.i(TAG, "Remote video track received! Attaching to renderer...")
@@ -678,6 +705,13 @@ class MainActivity : ComponentActivity() {
             streamRenderer?.initRenderer(wrapper.eglBase.eglBaseContext, rendererEvents)
         }
 
+        isGamepadChannelOpen = false
+        isControlChannelOpen = false
+        gamepadChannelId = -1
+        controlChannelId = -1
+        gamepadPacketsSent = 0
+        gamepadDebugStatus = ""
+
         connectionState = ConnectionState.DISCONNECTED
         statusDetail = statusText
         errorMessage = errorText
@@ -709,6 +743,22 @@ class MainActivity : ComponentActivity() {
                     Log.w(TAG, "Cloudmatch stop for session $sessionId failed: ${ex.message}")
                 }
         }
+    }
+
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        if (gamepadController?.handleGenericMotionEvent(ev) == true) {
+            gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
+            return true
+        }
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (gamepadController?.handleKeyEvent(event) == true) {
+            gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {
@@ -756,7 +806,7 @@ class MainActivity : ComponentActivity() {
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Phase 1 — Video PoC",
+                            text = "Phase 2 — Gamepad Input",
                             color = Color(0xFFFFB224),
                             fontSize = 12.sp
                         )
@@ -840,6 +890,101 @@ class MainActivity : ComponentActivity() {
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8D6E63))
                             ) {
                                 Text("Close", color = Color.White)
+                            }
+                        }
+                    }
+                }
+
+                // Gamepad Status & Trigger Card (Phase 2)
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isGamepadChannelOpen) Color(0xDD1B3320) else Color(0xDD2A2D34)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "🎮 Gamepad Channel",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            val channelStatus = if (isGamepadChannelOpen) "OPEN (id $gamepadChannelId)" else "CLOSED"
+                            val channelColor = if (isGamepadChannelOpen) Color(0xFF4CAF50) else Color(0xFFE57373)
+                            Text(
+                                text = channelStatus,
+                                color = channelColor,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Control: ${if (isControlChannelOpen) "OPEN (id $controlChannelId)" else "CLOSED"}",
+                                color = if (isControlChannelOpen) Color(0xFF81C784) else Color(0xFF9E9E9E),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = "TX: $gamepadPacketsSent",
+                                color = Color(0xFF90CAF9),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        if (gamepadDebugStatus.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = gamepadDebugStatus,
+                                color = Color(0xFFFFD54F),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    lifecycleScope.launch {
+                                        gamepadDebugStatus = "Running debug sequence..."
+                                        gamepadController?.runDebugSequence { step ->
+                                            runOnUiThread {
+                                                gamepadDebugStatus = step
+                                                gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = isGamepadChannelOpen,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF76B900),
+                                    disabledContainerColor = Color(0xFF424242)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = "Test Gamepad (A + Sticks)",
+                                    fontSize = 12.sp,
+                                    color = if (isGamepadChannelOpen) Color.Black else Color.Gray
+                                )
                             }
                         }
                     }

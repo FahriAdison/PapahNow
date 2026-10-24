@@ -3,7 +3,7 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [main, phase1-poc]
+    branches: [main, phase1-poc, phase2-input, "phase*"]
   pull_request:
 
 jobs:
