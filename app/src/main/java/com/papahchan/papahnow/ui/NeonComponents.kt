@@ -66,13 +66,13 @@ import androidx.compose.ui.window.DialogProperties
  * Top Appbar for Neon-Noir 2.0.
  * Features:
  * - Brand wordmark "PAPAHNOW" with amber indicator dot
- * - Telemetry pill "ID-JKT • 14ms" with online green dot
+ * - Telemetry pill with online dot and single-source latency ("estimasi")
  * - Notification bell & user avatar "P"
  * - Touch targets >= 44x44 dp
  */
 @Composable
 fun NeonTopBar(
-    latencyText: String = "ID-JKT • 14ms",
+    latencyText: String = "ID-JKT • estimasi",
     onTelemetryClick: () -> Unit = {},
     onBellClick: () -> Unit = {},
     onAvatarClick: () -> Unit = {}
@@ -441,8 +441,8 @@ fun NeonSearchBar(
  */
 @Composable
 fun NeonRailLandscape(
-    title: String = "Lanjutkan Sesi",
-    subtitle: String = "Riwayat Cloud",
+    title: String = "Lanjutkan Sesi (Konsep / Preview)",
+    subtitle: String = "Konsep / Preview",
     items: List<NeonGame> = NeonCatalog.resumeSessions,
     onGameClick: (NeonGame) -> Unit
 ) {
@@ -495,6 +495,23 @@ fun NeonRailLandscape(
                             )
                             .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
                     ) {
+                        // Preview badge top-left
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                                .background(Color(0xD60A0E1A), RoundedCornerShape(NeonNoir.RadiusSm))
+                                .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusSm))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "PREVIEW",
+                                color = NeonNoir.Txt2,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
                         // Input badge top-right
                         Box(
                             modifier = Modifier
@@ -641,27 +658,31 @@ fun NeonRailPortrait(
                             .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
                     ) {
                         // Tag top-left
-                        game.tag?.let { tagText ->
-                            val (tagBg, tagColor, tagBorder) = when (game.tagType) {
-                                "free" -> Triple(NeonNoir.Amber, NeonNoir.AmberInk, NeonNoir.Amber)
-                                "hot" -> Triple(Color(0xE00A0E1A), NeonNoir.Danger, Color(0x80FF6A4D))
-                                else -> Triple(Color(0xE00A0E1A), NeonNoir.Amber, Color(0x73FFB224))
+                        val tagText = game.tag ?: "Preview"
+                        val (tagBg, tagColor, tagBorder) = when (game.tagType) {
+                            "free" -> Triple(NeonNoir.Amber, NeonNoir.AmberInk, NeonNoir.Amber)
+                            "hot" -> Triple(Color(0xE00A0E1A), NeonNoir.Danger, Color(0x80FF6A4D))
+                            else -> Triple(Color(0xE00A0E1A), NeonNoir.Amber, Color(0x73FFB224))
+                        }
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(7.dp)
+                                .background(tagBg, RoundedCornerShape(NeonNoir.RadiusSm))
+                                .border(1.dp, tagBorder, RoundedCornerShape(NeonNoir.RadiusSm))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            val displayTag = if (tagText.contains("Preview", ignoreCase = true)) {
+                                tagText.uppercase()
+                            } else {
+                                "${tagText.uppercase()} • PREVIEW"
                             }
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .padding(7.dp)
-                                    .background(tagBg, RoundedCornerShape(NeonNoir.RadiusSm))
-                                    .border(1.dp, tagBorder, RoundedCornerShape(NeonNoir.RadiusSm))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = tagText.uppercase(),
-                                    color = tagColor,
-                                    fontSize = 9.5.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                            Text(
+                                text = displayTag,
+                                color = tagColor,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
 
                         // Input badge top-right
@@ -902,7 +923,7 @@ fun NeonCommandPalette(
                         if (query.isNotEmpty()) {
                             IconButton(
                                 onClick = { query = "" },
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(NeonNoir.MinTouchTarget)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Close,
@@ -1045,6 +1066,7 @@ fun NeonCommandPalette(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(min = NeonNoir.MinTouchTarget)
                             .border(1.dp, NeonNoir.LineSoft, RoundedCornerShape(NeonNoir.RadiusSm))
                             .padding(horizontal = 10.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1052,12 +1074,13 @@ fun NeonCommandPalette(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.heightIn(min = NeonNoir.MinTouchTarget)
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .background(NeonNoir.Amber, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                                    .background(NeonNoir.Amber, RoundedCornerShape(NeonNoir.RadiusSm))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
                                     text = "A",
@@ -1067,7 +1090,7 @@ fun NeonCommandPalette(
                                 )
                             }
                             Text(
-                                text = "Mainkan",
+                                text = "Pilih",
                                 color = NeonNoir.Txt2,
                                 fontSize = 11.5.sp
                             )
@@ -1076,13 +1099,15 @@ fun NeonCommandPalette(
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.clickable { onDismiss() }
+                            modifier = Modifier
+                                .heightIn(min = NeonNoir.MinTouchTarget)
+                                .clickable { onDismiss() }
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .background(NeonNoir.Ink800, RoundedCornerShape(4.dp))
-                                    .border(1.dp, NeonNoir.Line, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                                    .background(NeonNoir.Ink800, RoundedCornerShape(NeonNoir.RadiusSm))
+                                    .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusSm))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
                                     text = "B",

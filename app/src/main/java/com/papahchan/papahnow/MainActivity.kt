@@ -38,7 +38,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -46,7 +45,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -188,6 +186,12 @@ class MainActivity : ComponentActivity() {
                 toastMessage = null
             }
         }
+    }
+
+    private fun getTelemetryDisplay(): String {
+        val zone = cloudmatchZone.trim()
+        val loc = if (zone.isNotBlank()) zone else "ID-JKT"
+        return "$loc • estimasi"
     }
 
     /**
@@ -812,15 +816,16 @@ class MainActivity : ComponentActivity() {
                 .fillMaxSize()
                 .background(NeonNoir.Ink950)
         ) {
-            if (connectionState == ConnectionState.STREAMING) {
-                // --- STREAMING VIEW (Full-bleed WebRTC Video + Neon-Noir HUD Overlay) ---
-                streamRenderer?.let { renderer ->
-                    AndroidView(
-                        factory = { renderer },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
+            // Full-screen WebRTC video renderer (composed unconditionally like base 56acc98,
+            // ensuring SurfaceView attaches before first frame arrives to prevent deadlock)
+            streamRenderer?.let { renderer ->
+                AndroidView(
+                    factory = { renderer },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
+            if (connectionState == ConnectionState.STREAMING) {
                 // Streaming HUD Overlay
                 Column(
                     modifier = Modifier
@@ -960,12 +965,12 @@ class MainActivity : ComponentActivity() {
                 ) {
                     // Top Appbar (Fixed)
                     NeonTopBar(
-                        latencyText = if (cloudmatchZone.isNotBlank()) "$cloudmatchZone • 14ms" else "ID-JKT • 14ms",
+                        latencyText = getTelemetryDisplay(),
                         onTelemetryClick = {
-                            showNeonToast("Server: ${cloudmatchZone.ifBlank { "Prod" }} • Latensi: 14ms • Rig RTX Siap")
+                            showNeonToast("Server: ${cloudmatchZone.ifBlank { "ID-JKT" }} • Latensi: estimasi (belum diukur)")
                         },
                         onBellClick = {
-                            showNeonToast("Notifikasi: Tidak ada antrean di server ID-JKT.")
+                            showNeonToast("Notifikasi: Tidak ada antrean.")
                         },
                         onAvatarClick = {
                             showDebugPanel = !showDebugPanel
@@ -1017,7 +1022,7 @@ class MainActivity : ComponentActivity() {
                                                 contentColor = Color.White
                                             ),
                                             shape = RoundedCornerShape(NeonNoir.RadiusSm),
-                                            modifier = Modifier.height(36.dp)
+                                            modifier = Modifier.height(NeonNoir.MinTouchTarget)
                                         ) {
                                             Text("Batal", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                         }
@@ -1051,13 +1056,13 @@ class MainActivity : ComponentActivity() {
                                             )
                                             IconButton(
                                                 onClick = { errorMessage = null },
-                                                modifier = Modifier.size(24.dp)
+                                                modifier = Modifier.size(NeonNoir.MinTouchTarget)
                                             ) {
                                                 Icon(
                                                     imageVector = Icons.Default.Close,
                                                     contentDescription = "Close",
                                                     tint = NeonNoir.Txt2,
-                                                    modifier = Modifier.size(14.dp)
+                                                    modifier = Modifier.size(16.dp)
                                                 )
                                             }
                                         }
@@ -1108,10 +1113,10 @@ class MainActivity : ComponentActivity() {
                         item {
                             NeonHeroCarousel(
                                 onLaunchClick = { slide ->
-                                    startFullConnectionFlow()
+                                    showNeonToast("Katalog menyusul (Preview: ${slide.title})")
                                 },
                                 onLibraryClick = {
-                                    showNeonToast("Pustaka Cloud — Siap dimainkan tanpa antrean.")
+                                    showNeonToast("Pustaka Cloud — fitur katalog sedang disiapkan.")
                                 }
                             )
                         }
@@ -1127,8 +1132,10 @@ class MainActivity : ComponentActivity() {
                         // Rail 1: Lanjutkan Sesi (Landscape 16:9)
                         item {
                             NeonRailLandscape(
+                                title = "Lanjutkan Sesi (Konsep / Preview)",
+                                subtitle = "Riwayat Cloud",
                                 onGameClick = { game ->
-                                    startFullConnectionFlow()
+                                    showNeonToast("Katalog menyusul (Preview: ${game.title})")
                                 }
                             )
                         }
@@ -1136,10 +1143,11 @@ class MainActivity : ComponentActivity() {
                         // Rail 2: Performa Tinggi • Rig RTX (Portrait)
                         item {
                             NeonRailPortrait(
-                                title = "Performa Tinggi • Rig RTX",
+                                title = "Performa Tinggi • Rig RTX (Preview)",
+                                actionLabel = "Konsep / Preview",
                                 items = NeonCatalog.rtxRail,
                                 onGameClick = { game ->
-                                    startFullConnectionFlow()
+                                    showNeonToast("Katalog menyusul (Preview: ${game.title})")
                                 }
                             )
                         }
@@ -1147,10 +1155,11 @@ class MainActivity : ComponentActivity() {
                         // Rail 3: Gratis & Instan Tanpa Antrean (Portrait)
                         item {
                             NeonRailPortrait(
-                                title = "Gratis & Instan Tanpa Antrean",
+                                title = "Gratis & Instan Tanpa Antrean (Preview)",
+                                actionLabel = "Konsep / Preview",
                                 items = NeonCatalog.freeRail,
                                 onGameClick = { game ->
-                                    startFullConnectionFlow()
+                                    showNeonToast("Katalog menyusul (Preview: ${game.title})")
                                 }
                             )
                         }
@@ -1243,8 +1252,8 @@ class MainActivity : ComponentActivity() {
                             when (tab) {
                                 "home" -> {}
                                 "search" -> showCommandPalette = true
-                                "library" -> showNeonToast("Pustaka Cloud — 3 sesi aktif siap dilanjutkan.")
-                                "profile" -> showNeonToast("Profil — Paket Prioritas RTX • Server terdekat ID-JKT (14ms).")
+                                "library" -> showNeonToast("Pustaka Cloud — fitur katalog sedang disiapkan.")
+                                "profile" -> showNeonToast("Profil — Akun Cloud Gaming (Pengaturan & Info Sesi).")
                             }
                         }
                     )
@@ -1256,7 +1265,7 @@ class MainActivity : ComponentActivity() {
                 NeonCommandPalette(
                     onDismiss = { showCommandPalette = false },
                     onSelectGame = { gameTitle ->
-                        startFullConnectionFlow()
+                        showNeonToast("Katalog menyusul (Preview: $gameTitle)")
                     }
                 )
             }

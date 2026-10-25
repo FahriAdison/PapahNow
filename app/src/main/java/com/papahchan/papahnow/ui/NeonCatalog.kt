@@ -7,7 +7,7 @@ object NeonCatalog {
         HeroSlide(
             id = "wangan",
             title = "Wangan Midnight: C1 Loop",
-            chip = "Rig Siap • Tanpa Antrean",
+            chip = "Preview • Rig Siap",
             meta = "🎮 Controller • 120 FPS • RTX On",
             rigTag = "RTX On",
             bgTop = Color(0xFF070B16),
@@ -17,7 +17,7 @@ object NeonCatalog {
         HeroSlide(
             id = "kurogane",
             title = "Kurogane: Iron Mandate",
-            chip = "Eksklusif Cloud • Patch 2.4",
+            chip = "Preview • Eksklusif Cloud",
             meta = "🎮 Controller • 60 FPS • Ray Tracing",
             rigTag = "Ray Tracing",
             bgTop = Color(0xFF0A0F1D),
@@ -27,7 +27,7 @@ object NeonCatalog {
         HeroSlide(
             id = "sektor7",
             title = "Sektor 7: Karantina",
-            chip = "Gratis Akhir Pekan • Co-op",
+            chip = "Preview • Co-op",
             meta = "👆 Touch & Pad • 60 FPS • Co-op 4 Pemain",
             rigTag = "Co-op 4 Pemain",
             bgTop = Color(0xFF080D18),
