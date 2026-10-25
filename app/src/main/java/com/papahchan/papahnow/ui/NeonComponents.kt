@@ -334,7 +334,7 @@ fun NeonHeroCarousel(
                     ),
                     shape = RoundedCornerShape(NeonNoir.RadiusMd),
                     modifier = Modifier
-                        .height(NeonNoir.MinTouchTarget)
+                        .heightIn(min = NeonNoir.MinTouchTarget)
                         .weight(1f)
                 ) {
                     Row(
@@ -363,7 +363,7 @@ fun NeonHeroCarousel(
                     ),
                     shape = RoundedCornerShape(NeonNoir.RadiusMd),
                     modifier = Modifier
-                        .height(NeonNoir.MinTouchTarget)
+                        .heightIn(min = NeonNoir.MinTouchTarget)
                         .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
                 ) {
                     Text(
