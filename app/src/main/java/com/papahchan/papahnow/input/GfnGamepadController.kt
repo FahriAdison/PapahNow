@@ -107,6 +107,11 @@ class GfnGamepadController(
 
         if (!isJoystick) return false
 
+        val pc = peerConnectionProvider()
+        if (pc == null || !pc.isGamepadChannelOpen()) {
+            return false
+        }
+
         // Left analog stick
         val rawLx = event.getAxisValue(MotionEvent.AXIS_X)
         val rawLy = event.getAxisValue(MotionEvent.AXIS_Y)
