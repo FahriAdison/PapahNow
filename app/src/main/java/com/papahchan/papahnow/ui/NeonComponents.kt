@@ -348,7 +348,7 @@ fun NeonHeroCarousel(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "Mainkan",
+                            text = "Mainkan (Preview)",
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
@@ -367,7 +367,7 @@ fun NeonHeroCarousel(
                         .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
                 ) {
                     Text(
-                        text = "+ Pustaka",
+                        text = "+ Pustaka (Preview)",
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 13.sp
                     )
@@ -1038,22 +1038,43 @@ fun NeonCommandPalette(
                                         )
                                     }
 
-                                    // Platform / Type Pill
-                                    Box(
-                                        modifier = Modifier
-                                            .border(
-                                                1.dp,
-                                                if (game.tagType == "free") NeonNoir.Amber else NeonNoir.Line,
-                                                RoundedCornerShape(NeonNoir.RadiusSm)
-                                            )
-                                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    // Preview Badge & Platform / Type Pill
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Text(
-                                            text = if (game.tagType == "free") "GRATIS" else "INSTAN",
-                                            color = if (game.tagType == "free") NeonNoir.Amber else NeonNoir.Txt2,
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        // Preview Badge (konsisten dengan badge di kartu)
+                                        Box(
+                                            modifier = Modifier
+                                                .background(Color(0xD60A0E1A), RoundedCornerShape(NeonNoir.RadiusSm))
+                                                .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusSm))
+                                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                                        ) {
+                                            Text(
+                                                text = "PREVIEW",
+                                                color = NeonNoir.Txt2,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        // Platform / Type Pill
+                                        Box(
+                                            modifier = Modifier
+                                                .border(
+                                                    1.dp,
+                                                    if (game.tagType == "free") NeonNoir.Amber else NeonNoir.Line,
+                                                    RoundedCornerShape(NeonNoir.RadiusSm)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                                        ) {
+                                            Text(
+                                                text = if (game.tagType == "free") "GRATIS" else "INSTAN",
+                                                color = if (game.tagType == "free") NeonNoir.Amber else NeonNoir.Txt2,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
                                 }
                             }
