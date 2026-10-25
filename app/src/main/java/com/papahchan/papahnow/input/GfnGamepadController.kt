@@ -63,7 +63,17 @@ class GfnGamepadController(
      * Returns true if the key was recognized and handled as a gamepad button.
      */
     fun handleKeyEvent(event: KeyEvent): Boolean {
+        val source = event.source
+        val isGamepadDevice = (source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+            (source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+        if (!isGamepadDevice) return false
+
         val buttonBit = mapKeyCodeToButtonBit(event.keyCode) ?: return false
+
+        val pc = peerConnectionProvider()
+        if (pc == null || !pc.isGamepadChannelOpen()) {
+            return false
+        }
 
         val isDown = event.action == KeyEvent.ACTION_DOWN
         val currentButtons = currentState.buttons
@@ -77,7 +87,11 @@ class GfnGamepadController(
         // Only transmit if the button state actually changed (or first event)
         if (newButtons != currentButtons || event.repeatCount == 0) {
             currentState = currentState.copy(buttons = newButtons)
-            sendCurrentState()
+            val sent = sendCurrentState()
+            if (!sent) {
+                currentState = currentState.copy(buttons = currentButtons)
+                return false
+            }
         }
         return true
     }
