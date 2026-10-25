@@ -11,6 +11,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,14 +23,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -41,6 +50,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -54,6 +64,16 @@ import com.papahchan.papahnow.input.GfnGamepadController
 import com.papahchan.papahnow.session.GfnSessionClient
 import com.papahchan.papahnow.session.SignalingServerInfo
 import com.papahchan.papahnow.signaling.GfnSignalingClient
+import com.papahchan.papahnow.ui.NeonBottomTabbar
+import com.papahchan.papahnow.ui.NeonCatalog
+import com.papahchan.papahnow.ui.NeonCommandPalette
+import com.papahchan.papahnow.ui.NeonDiagnosticsCard
+import com.papahchan.papahnow.ui.NeonHeroCarousel
+import com.papahchan.papahnow.ui.NeonNoir
+import com.papahchan.papahnow.ui.NeonRailLandscape
+import com.papahchan.papahnow.ui.NeonRailPortrait
+import com.papahchan.papahnow.ui.NeonSearchBar
+import com.papahchan.papahnow.ui.NeonTopBar
 import com.papahchan.papahnow.webrtc.GfnPeerConnection
 import com.papahchan.papahnow.webrtc.StreamRenderer
 import kotlinx.coroutines.CoroutineScope
@@ -154,6 +174,21 @@ class MainActivity : ComponentActivity() {
     private var authCodeInput by mutableStateOf("")
     private var cloudmatchZone by mutableStateOf(DEFAULT_CLOUDMATCH_ZONE)
     private var showDebugPanel by mutableStateOf(false)
+
+    // Neon-Noir 2.0 UI State
+    private var activeTab by mutableStateOf("home")
+    private var showCommandPalette by mutableStateOf(false)
+    private var toastMessage by mutableStateOf<String?>(null)
+
+    private fun showNeonToast(message: String) {
+        toastMessage = message
+        lifecycleScope.launch {
+            delay(3000)
+            if (toastMessage == message) {
+                toastMessage = null
+            }
+        }
+    }
 
     /**
      * First decoded frame is the only reliable "video is actually flowing"
@@ -775,358 +810,601 @@ class MainActivity : ComponentActivity() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0A0E1A))
+                .background(NeonNoir.Ink950)
         ) {
-            // Full-screen WebRTC video renderer
-            streamRenderer?.let { renderer ->
-                AndroidView(
-                    factory = { renderer },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            // Top Status & Controls Overlay
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .align(Alignment.TopCenter)
-            ) {
-                // Header Bar
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "PapahNow",
-                            color = Color.White,
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Phase 2 — Gamepad Input",
-                            color = Color(0xFFFFB224),
-                            fontSize = 12.sp
-                        )
-                    }
-
-                    // Connection State Badge
-                    val stateColor = when (connectionState) {
-                        ConnectionState.STREAMING -> Color(0xFF4CAF50)
-                        ConnectionState.CONNECTING, ConnectionState.SIGNALING, ConnectionState.CREATING_SESSION -> Color(0xFF2196F3)
-                        ConnectionState.AUTHENTICATING -> Color(0xFFFF9800)
-                        ConnectionState.DISCONNECTED -> Color(0xFF9E9E9E)
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .background(stateColor.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = connectionState.label,
-                            color = stateColor,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-
-                if (statusDetail.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = statusDetail,
-                        color = Color(0xFFB0BEC5),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
+            if (connectionState == ConnectionState.STREAMING) {
+                // --- STREAMING VIEW (Full-bleed WebRTC Video + Neon-Noir HUD Overlay) ---
+                streamRenderer?.let { renderer ->
+                    AndroidView(
+                        factory = { renderer },
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
-                // Error Banner
-                errorMessage?.let { error ->
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xCCB00020)),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "Error: $error",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier
-                                .heightIn(max = 300.dp)
-                                .verticalScroll(rememberScrollState())
-                                .padding(10.dp)
-                        )
-                    }
-                }
-
-                // Persisted crash banner from the previous run (record is cleared
-                // from prefs as soon as it is read; Close just hides the card).
-                lastCrash?.let { crash ->
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xCC4E342E)),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "Last crash: $crash",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier
-                                    .heightIn(max = 240.dp)
-                                    .verticalScroll(rememberScrollState())
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Button(
-                                onClick = { lastCrash = null },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8D6E63))
-                            ) {
-                                Text("Close", color = Color.White)
-                            }
-                        }
-                    }
-                }
-
-                // Gamepad Status & Trigger Card (Phase 2)
-                Spacer(modifier = Modifier.height(8.dp))
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (isGamepadChannelOpen) Color(0xDD1B3320) else Color(0xDD2A2D34)
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                // Streaming HUD Overlay
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .align(Alignment.TopCenter)
                 ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "🎮 Gamepad Channel",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                            val channelStatus = if (isGamepadChannelOpen) "OPEN (id $gamepadChannelId)" else "CLOSED"
-                            val channelColor = if (isGamepadChannelOpen) Color(0xFF4CAF50) else Color(0xFFE57373)
-                            Text(
-                                text = channelStatus,
-                                color = channelColor,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Control: ${if (isControlChannelOpen) "OPEN (id $controlChannelId)" else "CLOSED"}",
-                                color = if (isControlChannelOpen) Color(0xFF81C784) else Color(0xFF9E9E9E),
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "TX: $gamepadPacketsSent",
-                                color = Color(0xFF90CAF9),
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-
-                        if (gamepadDebugStatus.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = gamepadDebugStatus,
-                                color = Color(0xFFFFD54F),
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    lifecycleScope.launch {
-                                        gamepadDebugStatus = "Running debug sequence..."
-                                        gamepadController?.runDebugSequence { step ->
-                                            runOnUiThread {
-                                                gamepadDebugStatus = step
-                                                gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
-                                            }
-                                        }
-                                    }
-                                },
-                                enabled = isGamepadChannelOpen,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF76B900),
-                                    disabledContainerColor = Color(0xFF424242)
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(
-                                    text = "Test Gamepad (A + Sticks)",
-                                    fontSize = 12.sp,
-                                    color = if (isGamepadChannelOpen) Color.Black else Color.Gray
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Action Buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (connectionState == ConnectionState.DISCONNECTED) {
-                        Button(
-                            onClick = { startFullConnectionFlow() },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF76B900)), // NVIDIA Green
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Connect", color = Color.Black, fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        Button(
-                            onClick = { disconnectAll() },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE53935)),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Disconnect", color = Color.White, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = { showDebugPanel = !showDebugPanel },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-                    ) {
-                        Text(if (showDebugPanel) "Hide Debug" else "Debug Options")
-                    }
-                }
-
-                // Collapsible Debug / Manual Overrides Panel
-                if (showDebugPanel) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xEE161B2E)),
-                        shape = RoundedCornerShape(10.dp),
+                    // Top HUD Bar
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
+                            .background(Color(0xD90A0E1A), RoundedCornerShape(NeonNoir.RadiusMd))
+                            .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(NeonNoir.Amber, CircleShape)
+                            )
                             Text(
-                                text = "Manual & Debug Overrides",
-                                color = Color.White,
+                                text = "PAPAH",
+                                color = NeonNoir.Txt,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "NOW",
+                                color = NeonNoir.Amber,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+
+                        // State Badge (Amber for Streaming — replacing old NVIDIA green)
+                        Box(
+                            modifier = Modifier
+                                .background(Color(0x33FFB224), RoundedCornerShape(NeonNoir.RadiusSm))
+                                .border(1.dp, Color(0x73FFB224), RoundedCornerShape(NeonNoir.RadiusSm))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "STREAMING",
+                                color = NeonNoir.Amber,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
+                                fontSize = 11.sp,
+                                letterSpacing = 0.5.sp
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
 
-                            // Cloudmatch zone routing (e.g. eu-netherlands-south).
-                            OutlinedTextField(
-                                value = cloudmatchZone,
-                                onValueChange = { value ->
-                                    cloudmatchZone = value
-                                    getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
-                                        .edit()
-                                        .putString(CLOUDMATCH_ZONE_KEY, value)
-                                        .apply()
-                                },
-                                label = { Text("Zone (empty = prod)") },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF76B900)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                    if (statusDetail.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = statusDetail,
+                            color = NeonNoir.Txt2,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                            // Direct Signaling URL
-                            OutlinedTextField(
-                                value = directSignalingUrlInput,
-                                onValueChange = { directSignalingUrlInput = it },
-                                label = { Text("Direct Signaling WebSocket URL (wss://...)") },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF76B900)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            // OAuth Access Token
-                            OutlinedTextField(
-                                value = authTokenInput,
-                                onValueChange = { authTokenInput = it },
-                                label = { Text("Access Token (Bearer ...)") },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF76B900)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            // OAuth Code
-                            OutlinedTextField(
-                                value = authCodeInput,
-                                onValueChange = { authCodeInput = it },
-                                label = { Text("OAuth Code (from redirect)") },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White,
-                                    unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color(0xFF76B900)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                Button(
-                                    onClick = {
-                                        showDebugPanel = false
-                                        startFullConnectionFlow()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF76B900))
-                                ) {
-                                    Text("Apply & Connect", color = Color.Black)
+                    // Phase 2 Diagnostics Card (Restyled in Neon-Noir 2.0)
+                    NeonDiagnosticsCard(
+                        isGamepadOpen = isGamepadChannelOpen,
+                        isControlOpen = isControlChannelOpen,
+                        gamepadChannelId = gamepadChannelId,
+                        controlChannelId = controlChannelId,
+                        packetsSent = gamepadPacketsSent,
+                        debugStatus = gamepadDebugStatus,
+                        onTestGamepadClick = {
+                            lifecycleScope.launch {
+                                gamepadDebugStatus = "Running debug sequence..."
+                                gamepadController?.runDebugSequence { step ->
+                                    runOnUiThread {
+                                        gamepadDebugStatus = step
+                                        gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
+                                    }
                                 }
                             }
                         }
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Action buttons (Disconnect in danger, Debug Options in ghost)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { disconnectAll() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NeonNoir.Danger,
+                                contentColor = NeonNoir.AmberInk
+                            ),
+                            shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                            modifier = Modifier
+                                .height(NeonNoir.MinTouchTarget)
+                                .weight(1f)
+                        ) {
+                            Text("Disconnect", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+
+                        Button(
+                            onClick = { showDebugPanel = !showDebugPanel },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NeonNoir.Ink850,
+                                contentColor = NeonNoir.Txt
+                            ),
+                            shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                            modifier = Modifier
+                                .height(NeonNoir.MinTouchTarget)
+                                .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
+                        ) {
+                            Text(if (showDebugPanel) "Hide Debug" else "Debug Options", fontSize = 12.sp)
+                        }
+                    }
+
+                    // Collapsible Debug Panel (when streaming)
+                    if (showDebugPanel) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        NeonDebugPanel()
+                    }
+                }
+            } else {
+                // --- NEON-NOIR 2.0 MAIN DASHBOARD (Disconnected / Connecting) ---
+                Column(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // Top Appbar (Fixed)
+                    NeonTopBar(
+                        latencyText = if (cloudmatchZone.isNotBlank()) "$cloudmatchZone • 14ms" else "ID-JKT • 14ms",
+                        onTelemetryClick = {
+                            showNeonToast("Server: ${cloudmatchZone.ifBlank { "Prod" }} • Latensi: 14ms • Rig RTX Siap")
+                        },
+                        onBellClick = {
+                            showNeonToast("Notifikasi: Tidak ada antrean di server ID-JKT.")
+                        },
+                        onAvatarClick = {
+                            showDebugPanel = !showDebugPanel
+                        }
+                    )
+
+                    // Scrollable Main Content
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        // Connection / Authentication Progress Banner (if connecting)
+                        if (connectionState != ConnectionState.DISCONNECTED) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp)
+                                        .background(NeonNoir.Ink850, RoundedCornerShape(NeonNoir.RadiusMd))
+                                        .border(1.dp, NeonNoir.Amber, RoundedCornerShape(NeonNoir.RadiusMd))
+                                        .padding(12.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = connectionState.label,
+                                                color = NeonNoir.Amber,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp
+                                            )
+                                            if (statusDetail.isNotBlank()) {
+                                                Text(
+                                                    text = statusDetail,
+                                                    color = NeonNoir.Txt2,
+                                                    fontSize = 11.sp,
+                                                    fontFamily = FontFamily.Monospace
+                                                )
+                                            }
+                                        }
+                                        Button(
+                                            onClick = { disconnectAll() },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = NeonNoir.Danger,
+                                                contentColor = Color.White
+                                            ),
+                                            shape = RoundedCornerShape(NeonNoir.RadiusSm),
+                                            modifier = Modifier.height(36.dp)
+                                        ) {
+                                            Text("Batal", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Error Banner (if error occurred)
+                        errorMessage?.let { err ->
+                            item {
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = NeonNoir.Ink800),
+                                    shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                                        .border(1.dp, NeonNoir.Danger, RoundedCornerShape(NeonNoir.RadiusMd))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Error Koneksi",
+                                                color = NeonNoir.Danger,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                            IconButton(
+                                                onClick = { errorMessage = null },
+                                                modifier = Modifier.size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Close",
+                                                    tint = NeonNoir.Txt2,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = err,
+                                            color = NeonNoir.Txt,
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            modifier = Modifier.heightIn(max = 200.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Crash Banner (if any previous run crash)
+                        lastCrash?.let { crash ->
+                            item {
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = NeonNoir.Ink800),
+                                    shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                                        .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Text(
+                                            text = "Last Crash: $crash",
+                                            color = NeonNoir.Txt2,
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Button(
+                                            onClick = { lastCrash = null },
+                                            colors = ButtonDefaults.buttonColors(containerColor = NeonNoir.Ink850)
+                                        ) {
+                                            Text("Tutup", color = NeonNoir.Txt, fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Hero Carousel (True Full-Bleed)
+                        item {
+                            NeonHeroCarousel(
+                                onLaunchClick = { slide ->
+                                    startFullConnectionFlow()
+                                },
+                                onLibraryClick = {
+                                    showNeonToast("Pustaka Cloud — Siap dimainkan tanpa antrean.")
+                                }
+                            )
+                        }
+
+                        // Mobile Search Bar Trigger
+                        item {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            NeonSearchBar(
+                                onClick = { showCommandPalette = true }
+                            )
+                        }
+
+                        // Rail 1: Lanjutkan Sesi (Landscape 16:9)
+                        item {
+                            NeonRailLandscape(
+                                onGameClick = { game ->
+                                    startFullConnectionFlow()
+                                }
+                            )
+                        }
+
+                        // Rail 2: Performa Tinggi • Rig RTX (Portrait)
+                        item {
+                            NeonRailPortrait(
+                                title = "Performa Tinggi • Rig RTX",
+                                items = NeonCatalog.rtxRail,
+                                onGameClick = { game ->
+                                    startFullConnectionFlow()
+                                }
+                            )
+                        }
+
+                        // Rail 3: Gratis & Instan Tanpa Antrean (Portrait)
+                        item {
+                            NeonRailPortrait(
+                                title = "Gratis & Instan Tanpa Antrean",
+                                items = NeonCatalog.freeRail,
+                                onGameClick = { game ->
+                                    startFullConnectionFlow()
+                                }
+                            )
+                        }
+
+                        // Diagnostics Card (Phase 2 Gamepad status & Test Gamepad trigger)
+                        item {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text(
+                                    text = "Diagnostik Perangkat & Input",
+                                    color = NeonNoir.Txt,
+                                    fontSize = 16.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.2.sp
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                NeonDiagnosticsCard(
+                                    isGamepadOpen = isGamepadChannelOpen,
+                                    isControlOpen = isControlChannelOpen,
+                                    gamepadChannelId = gamepadChannelId,
+                                    controlChannelId = controlChannelId,
+                                    packetsSent = gamepadPacketsSent,
+                                    debugStatus = gamepadDebugStatus,
+                                    onTestGamepadClick = {
+                                        lifecycleScope.launch {
+                                            gamepadDebugStatus = "Running debug sequence..."
+                                            gamepadController?.runDebugSequence { step ->
+                                                runOnUiThread {
+                                                    gamepadDebugStatus = step
+                                                    gamepadPacketsSent = gamepadController?.totalPacketsSent?.get() ?: 0
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Quick Connect & Debug options row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = { startFullConnectionFlow() },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = NeonNoir.Amber,
+                                            contentColor = NeonNoir.AmberInk
+                                        ),
+                                        shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                                        modifier = Modifier
+                                            .height(NeonNoir.MinTouchTarget)
+                                            .weight(1f)
+                                    ) {
+                                        Text("Connect Stream", fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                                    }
+
+                                    Button(
+                                        onClick = { showDebugPanel = !showDebugPanel },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = NeonNoir.Ink900,
+                                            contentColor = NeonNoir.Txt
+                                        ),
+                                        shape = RoundedCornerShape(NeonNoir.RadiusMd),
+                                        modifier = Modifier
+                                            .height(NeonNoir.MinTouchTarget)
+                                            .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
+                                    ) {
+                                        Text(if (showDebugPanel) "Hide Overrides" else "Debug Options", fontSize = 12.sp)
+                                    }
+                                }
+
+                                if (showDebugPanel) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    NeonDebugPanel()
+                                }
+                            }
+                        }
+
+                        // Bottom Spacer for tabbar
+                        item {
+                            Spacer(modifier = Modifier.height(20.dp))
+                        }
+                    }
+
+                    // Bottom Navigation Bar (Fixed)
+                    NeonBottomTabbar(
+                        activeTab = activeTab,
+                        onTabSelect = { tab ->
+                            activeTab = tab
+                            when (tab) {
+                                "home" -> {}
+                                "search" -> showCommandPalette = true
+                                "library" -> showNeonToast("Pustaka Cloud — 3 sesi aktif siap dilanjutkan.")
+                                "profile" -> showNeonToast("Profil — Paket Prioritas RTX • Server terdekat ID-JKT (14ms).")
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Command Palette Sheet
+            if (showCommandPalette) {
+                NeonCommandPalette(
+                    onDismiss = { showCommandPalette = false },
+                    onSelectGame = { gameTitle ->
+                        startFullConnectionFlow()
+                    }
+                )
+            }
+
+            // Floating Toast
+            toastMessage?.let { toast ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 72.dp)
+                        .clip(RoundedCornerShape(NeonNoir.RadiusMd))
+                        .background(NeonNoir.Ink800)
+                        .border(1.dp, Color(0x8CFFB224), RoundedCornerShape(NeonNoir.RadiusMd))
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .background(NeonNoir.Amber, CircleShape)
+                        )
+                        Text(
+                            text = toast,
+                            color = NeonNoir.Txt,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun NeonDebugPanel() {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = NeonNoir.Ink900),
+            shape = RoundedCornerShape(NeonNoir.RadiusMd),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, NeonNoir.Line, RoundedCornerShape(NeonNoir.RadiusMd))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "Manual & Debug Overrides",
+                    color = NeonNoir.Txt,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Cloudmatch zone routing
+                OutlinedTextField(
+                    value = cloudmatchZone,
+                    onValueChange = { value ->
+                        cloudmatchZone = value
+                        getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+                            .edit()
+                            .putString(CLOUDMATCH_ZONE_KEY, value)
+                            .apply()
+                    },
+                    label = { Text("Zone (empty = prod)", color = NeonNoir.Txt3) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = NeonNoir.Txt,
+                        unfocusedTextColor = NeonNoir.Txt,
+                        focusedBorderColor = NeonNoir.Amber,
+                        unfocusedBorderColor = NeonNoir.Line,
+                        cursorColor = NeonNoir.Amber
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Direct Signaling URL
+                OutlinedTextField(
+                    value = directSignalingUrlInput,
+                    onValueChange = { directSignalingUrlInput = it },
+                    label = { Text("Direct Signaling WebSocket URL (wss://...)", color = NeonNoir.Txt3) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = NeonNoir.Txt,
+                        unfocusedTextColor = NeonNoir.Txt,
+                        focusedBorderColor = NeonNoir.Amber,
+                        unfocusedBorderColor = NeonNoir.Line,
+                        cursorColor = NeonNoir.Amber
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // OAuth Access Token
+                OutlinedTextField(
+                    value = authTokenInput,
+                    onValueChange = { authTokenInput = it },
+                    label = { Text("Access Token (Bearer ...)", color = NeonNoir.Txt3) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = NeonNoir.Txt,
+                        unfocusedTextColor = NeonNoir.Txt,
+                        focusedBorderColor = NeonNoir.Amber,
+                        unfocusedBorderColor = NeonNoir.Line,
+                        cursorColor = NeonNoir.Amber
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // OAuth Code
+                OutlinedTextField(
+                    value = authCodeInput,
+                    onValueChange = { authCodeInput = it },
+                    label = { Text("OAuth Code (from redirect)", color = NeonNoir.Txt3) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = NeonNoir.Txt,
+                        unfocusedTextColor = NeonNoir.Txt,
+                        focusedBorderColor = NeonNoir.Amber,
+                        unfocusedBorderColor = NeonNoir.Line,
+                        cursorColor = NeonNoir.Amber
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(
+                        onClick = {
+                            showDebugPanel = false
+                            startFullConnectionFlow()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = NeonNoir.Amber,
+                            contentColor = NeonNoir.AmberInk
+                        ),
+                        shape = RoundedCornerShape(NeonNoir.RadiusSm)
+                    ) {
+                        Text("Apply & Connect", fontWeight = FontWeight.Bold)
                     }
                 }
             }

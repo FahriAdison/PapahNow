@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Neon-Noir palette -->
+    <!-- Neon-Noir 2.0 Design Tokens -->
     <color name="neon_noir_base">#0A0E1A</color>
-    <color name="neon_noir_surface">#111827</color>
+    <color name="neon_noir_surface">#0D1424</color>
+    <color name="neon_noir_surface_raised">#131E33</color>
+    <color name="neon_noir_line">#1E2A45</color>
     <color name="neon_noir_amber">#FFB224</color>
-    <color name="neon_noir_amber_dim">#B97F16</color>
-    <color name="neon_noir_text">#E8EAF0</color>
-    <color name="neon_noir_text_muted">#8A93A8</color>
+    <color name="neon_noir_amber_deep">#E09500</color>
+    <color name="neon_noir_text">#E9EDF5</color>
+    <color name="neon_noir_text_secondary">#9AA5BB</color>
+    <color name="neon_noir_text_tertiary">#8695B0</color>
+    <color name="neon_noir_danger">#FF6A4D</color>
+    <color name="neon_noir_online">#2FD67B</color>
 </resources>
