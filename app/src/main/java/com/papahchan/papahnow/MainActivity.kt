@@ -742,6 +742,7 @@ class MainActivity : ComponentActivity() {
             val wrapper = GfnPeerConnection(this, peerConnectionListener)
             peerConnectionWrapper = wrapper
             streamRenderer?.initRenderer(wrapper.eglBase.eglBaseContext, rendererEvents)
+            streamRenderer?.clearImage()
         }
 
         isGamepadChannelOpen = false
@@ -816,13 +817,15 @@ class MainActivity : ComponentActivity() {
                 .fillMaxSize()
                 .background(NeonNoir.Ink950)
         ) {
-            // Full-screen WebRTC video renderer (composed unconditionally like base 56acc98,
-            // ensuring SurfaceView attaches before first frame arrives to prevent deadlock)
-            streamRenderer?.let { renderer ->
-                AndroidView(
-                    factory = { renderer },
-                    modifier = Modifier.fillMaxSize()
-                )
+            // Full-screen WebRTC video renderer (hidden when DISCONNECTED to prevent
+            // stale frame residue on dashboard; attaches during connection setup before first frame arrives)
+            if (connectionState != ConnectionState.DISCONNECTED) {
+                streamRenderer?.let { renderer ->
+                    AndroidView(
+                        factory = { renderer },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
 
             if (connectionState == ConnectionState.STREAMING) {

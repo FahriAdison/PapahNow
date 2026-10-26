@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -80,8 +81,9 @@ fun NeonTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
             .background(Color(0xD90A0E1A))
+            .statusBarsPadding()
+            .height(56.dp)
             .padding(horizontal = 16.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -324,7 +326,8 @@ fun NeonHeroCarousel(
             // CTA Buttons Row (min-height 44dp)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Bottom
             ) {
                 Button(
                     onClick = { onLaunchClick(slide) },
